@@ -1,0 +1,39 @@
+# Auger — Database Security Auditor
+# Core
+colorama>=0.4.6
+
+# MySQL / MariaDB
+PyMySQL>=1.1.0
+
+# PostgreSQL
+psycopg2-binary>=2.9.9
+
+# MSSQL (choose one; pymssql is pure-C, pyodbc needs system driver)
+pymssql>=2.2.11
+
+# Oracle
+oracledb>=2.3.0
+
+# MongoDB
+pymongo>=4.7.0
+
+# Redis
+redis>=5.0.0
+
+# Cassandra / ScyllaDB
+cassandra-driver>=3.29.1
+
+# Elasticsearch / OpenSearch
+elasticsearch>=8.13.0
+
+# CouchDB
+requests>=2.31.0
+
+# InfluxDB
+influxdb-client>=1.42.0
+
+# Neo4j
+neo4j>=5.20.0
+
+# AWS (Redshift IAM auth, DynamoDB, RDS IAM token)
+boto3>=1.34.0

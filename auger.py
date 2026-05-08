@@ -1,0 +1,4023 @@
+#!/usr/bin/env python3
+"""
+auger.py — Database Security Auditor
+
+Performs comprehensive authenticated security audits of network-accessible
+databases: MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, MongoDB, Redis,
+Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, and AWS
+managed databases (RDS, DynamoDB, Redshift).
+
+Does NOT modify the database in any way.
+Accepts Crucible as a management console.
+"""
+
+import sys
+import os
+import json
+import re
+import socket
+import ssl
+import argparse
+import threading
+import time
+import csv
+import hashlib
+import platform
+import ipaddress
+import traceback
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse, quote_plus
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+VERSION = "1.1.0"
+
+# ---------------------------------------------------------------------------
+# Crucible protocol tokens (same as Fracture/Siphon)
+# ---------------------------------------------------------------------------
+_CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+_CP_LOG    = "__CRUCIBLE_LOG__:"
+_CP_ERR    = "__CRUCIBLE_ERR__:"
+_CP_PROMPT = "__CRUCIBLE_PROMPT__:"
+_CP_STATUS = "__CRUCIBLE_STATUS__:"
+
+# ---------------------------------------------------------------------------
+# ANSI colours (disabled under Crucible)
+# ---------------------------------------------------------------------------
+try:
+    from colorama import Fore, Style, init as _ca_init
+    _ca_init(autoreset=True)
+    _HAS_COLOR = not _CRUCIBLE_MANAGED
+except ImportError:
+    class _FallbackFore:
+        CYAN = RED = GREEN = YELLOW = WHITE = MAGENTA = ""
+    class _FallbackStyle:
+        RESET_ALL = ""
+    Fore  = _FallbackFore()
+    Style = _FallbackStyle()
+    _HAS_COLOR = False
+
+# ---------------------------------------------------------------------------
+# EOL version tables (confirmed by vendor EOL announcements)
+# ---------------------------------------------------------------------------
+_EOL_VERSIONS = {
+    "mysql": {
+        "5.0": True, "5.1": True, "5.5": True, "5.6": True, "5.7": True,
+    },
+    "mariadb": {
+        "5.5": True, "10.0": True, "10.1": True, "10.2": True, "10.3": True,
+        "10.4": True, "10.5": True, "10.6": False,
+    },
+    "postgresql": {
+        "9.0": True, "9.1": True, "9.2": True, "9.3": True, "9.4": True,
+        "9.5": True, "9.6": True, "10": True, "11": True, "12": False,
+    },
+    "mssql": {
+        "2005": True, "2008": True, "2012": True, "2014": True, "2016": False,
+    },
+    "oracle": {
+        "9i": True, "10g": True, "11g": True, "11.1": True, "11.2": True,
+        "12.1": True, "12.2": False,
+    },
+    "mongodb": {
+        "2.4": True, "2.6": True, "3.0": True, "3.2": True, "3.4": True,
+        "3.6": True, "4.0": True, "4.2": False,
+    },
+    "redis": {
+        "2.0": True, "2.2": True, "2.4": True, "2.6": True, "2.8": True,
+        "3.0": True, "3.2": True, "4.0": True, "5.0": False,
+    },
+    "elasticsearch": {
+        "1.0": True, "1.5": True, "1.7": True, "2.0": True, "2.4": True,
+        "5.0": True, "5.6": True, "6.0": True, "6.8": True, "7.0": False,
+    },
+    "cassandra": {
+        "1.0": True, "1.1": True, "1.2": True, "2.0": True, "2.1": True,
+        "2.2": True, "3.0": False,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Critical CVEs by database type and version prefix
+# ---------------------------------------------------------------------------
+_KNOWN_CVES = {
+    "mysql": [
+        {"cve": "CVE-2016-6662", "versions": ["5.5", "5.6", "5.7"], "cvss": 10.0,
+         "desc": "MySQL configuration file injection via general_log_file, allowing RCE as root."},
+        {"cve": "CVE-2016-6663", "versions": ["5.5", "5.6", "5.7"], "cvss": 7.0,
+         "desc": "Race condition allowing local privilege escalation to mysql system user."},
+        {"cve": "CVE-2021-2022", "versions": ["8.0"], "cvss": 4.4,
+         "desc": "InnoDB vulnerability allowing high-privilege attackers to cause DoS."},
+        {"cve": "CVE-2023-21980", "versions": ["8.0"], "cvss": 7.1,
+         "desc": "MySQL Server privilege escalation via optimizer component."},
+    ],
+    "postgresql": [
+        {"cve": "CVE-2018-1058", "versions": ["9.3", "9.4", "9.5", "9.6", "10"], "cvss": 8.8,
+         "desc": "Uncontrolled search_path allows superuser function hijacking."},
+        {"cve": "CVE-2019-10164", "versions": ["11", "10", "9.6", "9.5", "9.4"], "cvss": 7.5,
+         "desc": "Stack-based buffer overflow in SCRAM message processing."},
+        {"cve": "CVE-2023-2454", "versions": ["15", "14", "13", "12", "11"], "cvss": 7.2,
+         "desc": "Row security policies can be bypassed by superuser."},
+    ],
+    "mssql": [
+        {"cve": "CVE-2019-1068", "versions": ["2014", "2016", "2017"], "cvss": 8.8,
+         "desc": "Remote code execution via database engine memory corruption."},
+        {"cve": "CVE-2021-1636", "versions": ["2014", "2016", "2017", "2019"], "cvss": 8.8,
+         "desc": "Microsoft SQL Server privilege escalation vulnerability."},
+        {"cve": "CVE-2022-23276", "versions": ["2019", "2017"], "cvss": 8.8,
+         "desc": "SQL Server elevation of privilege vulnerability."},
+    ],
+    "mongodb": [
+        {"cve": "CVE-2019-2389", "versions": ["4.0", "3.6", "3.4"], "cvss": 7.5,
+         "desc": "MongoDB arbiter can bypass auth and access replica set data."},
+        {"cve": "CVE-2021-32036", "versions": ["4.4", "4.2", "4.0"], "cvss": 6.5,
+         "desc": "Missing authorization on certain diagnostic commands allows info disclosure."},
+    ],
+    "redis": [
+        {"cve": "CVE-2022-0543", "versions": ["6.0", "6.2", "5.0"], "cvss": 10.0,
+         "desc": "Lua sandbox escape in Debian/Ubuntu packages allowing RCE."},
+        {"cve": "CVE-2023-28425", "versions": ["7.0"], "cvss": 5.5,
+         "desc": "OBJECT ENCODING command argument injection."},
+        {"cve": "CVE-2021-32761", "versions": ["6.2", "6.0", "5.0"], "cvss": 6.0,
+         "desc": "Integer overflow in GETDEL/GETEX commands."},
+    ],
+    "elasticsearch": [
+        {"cve": "CVE-2014-3120", "versions": ["1.1", "1.2"], "cvss": 9.0,
+         "desc": "Dynamic scripting RCE via Groovy sandbox escape."},
+        {"cve": "CVE-2021-22145", "versions": ["7.13", "7.12"], "cvss": 6.5,
+         "desc": "Sensitive information disclosure in error messages."},
+        {"cve": "CVE-2023-31419", "versions": ["8.8", "7.17"], "cvss": 7.5,
+         "desc": "Stack overflow in wildcard query processing (DoS)."},
+    ],
+    "cassandra": [
+        {"cve": "CVE-2021-44521", "versions": ["3.0", "3.11", "4.0"], "cvss": 9.1,
+         "desc": "UDF execution allows RCE via Nashorn JS engine (when allow_insecure_udfs=true)."},
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Default credentials database
+# ---------------------------------------------------------------------------
+_DEFAULT_CREDS = {
+    "mysql":         [("root", ""), ("root", "root"), ("root", "mysql"),
+                      ("root", "toor"), ("mysql", "mysql"), ("admin", "admin")],
+    "mariadb":       [("root", ""), ("root", "root"), ("root", "mariadb"), ("mysql", "mysql")],
+    "postgresql":    [("postgres", "postgres"), ("postgres", ""), ("admin", "admin"),
+                      ("postgres", "password")],
+    "mssql":         [("sa", ""), ("sa", "sa"), ("sa", "password"), ("sa", "Password1"),
+                      ("sa", "Admin1234!"), ("admin", "admin")],
+    "oracle":        [("sys", "change_on_install"), ("system", "manager"),
+                      ("scott", "tiger"), ("hr", "hr"), ("sh", "sh"),
+                      ("oe", "oe"), ("pm", "pm"), ("bi", "bi"),
+                      ("dbsnmp", "dbsnmp"), ("sysman", "sysman"),
+                      ("outln", "outln"), ("mdsys", "mdsys")],
+    "mongodb":       [("admin", "admin"), ("root", "root"), ("admin", ""),
+                      ("administrator", "administrator")],
+    "redis":         [("", ""), ("", "redis"), ("", "password"), ("", "admin"),
+                      ("", "123456"), ("", "foobared")],
+    "cassandra":     [("cassandra", "cassandra"), ("admin", "admin")],
+    "elasticsearch": [("elastic", "changeme"), ("elastic", "elastic"),
+                      ("admin", "admin"), ("kibana", "kibana")],
+    "couchdb":       [("admin", "admin"), ("admin", "password"), ("couchdb", "couchdb")],
+    "influxdb":      [("admin", "admin"), ("admin", "password"), ("influxdb", "influxdb"),
+                      ("root", "root")],
+    "neo4j":         [("neo4j", "neo4j"), ("neo4j", "password"), ("admin", "admin")],
+}
+
+# ---------------------------------------------------------------------------
+# Compliance mappings helper
+# ---------------------------------------------------------------------------
+_OWASP_URLS = {
+    "A01:2021": "https://owasp.org/Top10/A01_2021-Broken_Access_Control/",
+    "A02:2021": "https://owasp.org/Top10/A02_2021-Cryptographic_Failures/",
+    "A03:2021": "https://owasp.org/Top10/A03_2021-Injection/",
+    "A05:2021": "https://owasp.org/Top10/A05_2021-Security_Misconfiguration/",
+    "A06:2021": "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/",
+    "A07:2021": "https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/",
+    "A09:2021": "https://owasp.org/Top10/A09_2021-Security_Logging_and_Monitoring_Failures/",
+}
+
+
+def _load_catalogue() -> dict:
+    """Load finding catalogue keyed by finding ID."""
+    cat_path = Path(__file__).parent / "catalogue" / "auger_catalogue.json"
+    if not cat_path.exists():
+        return {}
+    try:
+        items = json.loads(cat_path.read_text(encoding="utf-8"))
+        return {item["id"]: item for item in items if "id" in item}
+    except Exception:
+        return {}
+
+
+_CATALOGUE = _load_catalogue()
+
+# ---------------------------------------------------------------------------
+# Console  (Crucible-aware)
+# ---------------------------------------------------------------------------
+class AugerConsole:
+    def __init__(self):
+        self._managed = _CRUCIBLE_MANAGED
+        self._lock = threading.Lock()
+
+    @property
+    def managed(self):
+        return self._managed
+
+    def log(self, message: str, level: str = "INFO") -> None:
+        with self._lock:
+            if self._managed:
+                entry = {"ts": datetime.now().isoformat(), "level": level, "message": message}
+                sys.stdout.write(_CP_LOG + json.dumps(entry) + "\n")
+                sys.stdout.flush()
+            else:
+                _tags = {"INFO": "[*]", "SUCCESS": "[+]", "WARNING": "[~]",
+                         "ERROR": "[!]", "DEBUG": "[.]"}
+                _cols = {"INFO": Fore.CYAN, "SUCCESS": Fore.GREEN, "WARNING": Fore.YELLOW,
+                         "ERROR": Fore.RED, "DEBUG": Fore.WHITE}
+                c = _cols.get(level, "") if _HAS_COLOR else ""
+                tag = _tags.get(level, "[*]")
+                reset = Style.RESET_ALL if _HAS_COLOR else ""
+                print(f"{c}{tag}{reset} {message}")
+
+    def error(self, message: str, detail: str = "") -> None:
+        with self._lock:
+            if self._managed:
+                entry = {"ts": datetime.now().isoformat(), "source": "auger",
+                         "message": message, "detail": detail, "category": "Scan"}
+                sys.stderr.write(_CP_ERR + json.dumps(entry) + "\n")
+                sys.stderr.flush()
+            else:
+                r = Style.RESET_ALL if _HAS_COLOR else ""
+                print(f"{Fore.RED if _HAS_COLOR else ''}[!]{r} {message}", file=sys.stderr)
+
+    def status(self, phase: str, label: str = "", status: str = "running",
+               step: str = "", progress: int = 0, total: int = 0) -> None:
+        with self._lock:
+            if self._managed:
+                entry = {"phase": phase, "label": label or phase, "status": status,
+                         "step": step, "progress": progress, "total": total,
+                         "ts": datetime.now().isoformat()}
+                sys.stdout.write(_CP_STATUS + json.dumps(entry) + "\n")
+                sys.stdout.flush()
+            else:
+                pct = f" ({progress}/{total})" if total else ""
+                r = Style.RESET_ALL if _HAS_COLOR else ""
+                print(f"{Fore.MAGENTA if _HAS_COLOR else ''}[{label or phase}]{r} {step}{pct}")
+
+
+_console = AugerConsole()
+
+# ---------------------------------------------------------------------------
+# Output / finding manager  (Fracture-compatible schema)
+# ---------------------------------------------------------------------------
+_RE_UNSAFE = re.compile(r'[^\w\-]')
+
+FINDINGS_CSV_FIELDS = [
+    "title", "datetime", "ip", "port", "hostname", "risk", "command",
+    "description", "output", "cves", "sources", "service", "output_file",
+    "affected", "owasp", "owasp_asvs", "iso_27001", "pci_dss", "hipaa",
+    "nist", "remediation", "db_type", "db_version", "phase",
+    "validation_required", "validation_notes",
+]
+
+class AugerOutput:
+    _findings_lock = threading.Lock()
+    _log_lock      = threading.Lock()
+
+    def __init__(self, project_name: str, db_type: str, host: str, port: int) -> None:
+        self.project_name  = project_name
+        self.root          = Path(project_name).resolve()
+        self.db_type       = db_type
+        self.host          = host
+        self.port          = port
+        self.findings_json  = self.root / "findings.json"
+        self.findings_csv   = self.root / "findings.csv"
+        self.summary_json   = self.root / "summary.json"
+        self.schema_json    = self.root / "db_schema.json"
+        self.checkpoint_json = self.root / "checkpoint.json"
+        self.log_file       = self.root / "scan.log"
+        self.error_log      = self.root / "errors.log"
+        self._seen_keys: set = set()
+        self._setup()
+
+    def _setup(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        if not self.findings_json.exists():
+            self.findings_json.write_text("[]", encoding="utf-8")
+        else:
+            try:
+                existing = json.loads(self.findings_json.read_text(encoding="utf-8"))
+                for ex in (existing if isinstance(existing, list) else []):
+                    k = (ex.get("title", "").strip().lower(),
+                         ex.get("ip", ""), ex.get("port", 0))
+                    self._seen_keys.add(k)
+            except Exception:
+                pass
+        if not self.findings_csv.exists():
+            self._write_csv_header()
+        if not self.log_file.exists():
+            self.log_file.write_text(
+                f"{'='*70}\n  auger.py — Scan Log\n"
+                f"  Project : {self.project_name}\n"
+                f"  Created : {self._ts()}\n"
+                f"{'='*70}\n\n", encoding="utf-8")
+        if not self.error_log.exists():
+            self.error_log.write_text(
+                f"{'='*70}\n  auger.py — Error Log\n"
+                f"  Project : {self.project_name}\n"
+                f"  Created : {self._ts()}\n"
+                f"{'='*70}\n\n", encoding="utf-8")
+
+    def _write_csv_header(self) -> None:
+        with self.findings_csv.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FINDINGS_CSV_FIELDS, extrasaction="ignore")
+            w.writeheader()
+
+    def _ts(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def log_step(self, msg: str) -> None:
+        with self._log_lock:
+            with self.log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{self._ts()}] {msg}\n")
+
+    def log_error(self, tool: str, detail: str) -> None:
+        with self._log_lock:
+            with self.error_log.open("a", encoding="utf-8") as f:
+                f.write(f"[{self._ts()}] TOOL={tool}\n  {detail}\n\n")
+
+    def add_finding(self, title: str, risk: str, description: str,
+                    phase: str = "", output: str = "", cves: str = "",
+                    sources: str = "auger", remediation: str = "",
+                    owasp: str = "", owasp_asvs: str = "", iso_27001: str = "",
+                    pci_dss: str = "", hipaa: str = "", nist: str = "",
+                    catalogue_id: str = "", command: str = "",
+                    validation_required: bool = False,
+                    validation_notes: str = "",
+                    db_version: str = "") -> None:
+        ts = self._ts()
+        # Enrich from catalogue
+        cat = _CATALOGUE.get(catalogue_id, {})
+        if not owasp and cat:       owasp       = cat.get("owasp", "")
+        if not owasp_asvs and cat:  owasp_asvs  = cat.get("owasp_asvs", "")
+        if not iso_27001 and cat:   iso_27001   = cat.get("iso_27001", "")
+        if not pci_dss and cat:     pci_dss     = cat.get("pci_dss", "")
+        if not hipaa and cat:       hipaa       = cat.get("hipaa", "")
+        if not nist and cat:        nist        = cat.get("nist", "")
+        if not remediation and cat: remediation = cat.get("remediation", "")
+        if not cves and cat:        cves        = ",".join(cat.get("cves", []))
+        if not validation_required and cat: validation_required = cat.get("validation_required", False)
+        if not validation_notes and cat:    validation_notes    = cat.get("validation_notes", "")
+        owasp_url = _OWASP_URLS.get(owasp, "")
+        entry = {
+            "title":              title,
+            "datetime":           ts,
+            "ip":                 self.host,
+            "port":               self.port,
+            "hostname":           self.host,
+            "risk":               risk.upper(),
+            "command":            command,
+            "description":        description,
+            "output":             output[:4096] if output else "",
+            "cves":               cves,
+            "sources":            sources,
+            "service":            self.db_type,
+            "output_file":        "",
+            "affected":           f"{self.host}:{self.port}",
+            "exploitdb":          False,
+            "metasploit":         False,
+            "exploit_details":    [],
+            "owasp":              owasp,
+            "owasp_url":          owasp_url,
+            "owasp_asvs":         owasp_asvs,
+            "iso_27001":          iso_27001,
+            "pci_dss":            pci_dss,
+            "hipaa":              hipaa,
+            "nist":               nist,
+            "remediation":        remediation,
+            "db_type":            self.db_type,
+            "db_version":         db_version,
+            "phase":              phase,
+            "validation_required": validation_required,
+            "validation_notes":   validation_notes,
+            "catalogue_id":       catalogue_id,
+        }
+        with self._findings_lock:
+            key = (title.strip().lower(), self.host, self.port)
+            if key in self._seen_keys:
+                return
+            self._seen_keys.add(key)
+            try:
+                existing = json.loads(self.findings_json.read_text(encoding="utf-8"))
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+            existing.append(entry)
+            self.findings_json.write_text(json.dumps(existing, indent=2, ensure_ascii=False),
+                                           encoding="utf-8")
+            try:
+                with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=FINDINGS_CSV_FIELDS, extrasaction="ignore")
+                    w.writerow(entry)
+            except Exception:
+                pass
+        _console.log(
+            f"  [{risk.upper()}] {title}{'  [needs-validation]' if validation_required else ''}",
+            "SUCCESS" if risk in ("CRITICAL", "HIGH") else "WARNING"
+        )
+
+    def write_summary(self, db_version: str, db_type: str,
+                      auth_success: bool, phases_run: list) -> None:
+        try:
+            findings = json.loads(self.findings_json.read_text(encoding="utf-8"))
+        except Exception:
+            findings = []
+        risk_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        for f in findings:
+            r = f.get("risk", "INFO").upper()
+            risk_counts[r] = risk_counts.get(r, 0) + 1
+        summary = {
+            "tool": "auger",
+            "version": VERSION,
+            "db_type": db_type,
+            "db_version": db_version,
+            "target": f"{self.host}:{self.port}",
+            "auth_success": auth_success,
+            "phases_run": phases_run,
+            "total_findings": len(findings),
+            "risk_counts": risk_counts,
+            "completed_at": self._ts(),
+        }
+        self.summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    def write_schema(self, schema: dict) -> None:
+        self.schema_json.write_text(json.dumps(schema, indent=2, ensure_ascii=False),
+                                    encoding="utf-8")
+
+    def write_checkpoint(self, db_version: str, db_type: str,
+                         completed_phases: list, auth_success: bool) -> None:
+        cp = {
+            "version": VERSION,
+            "host": self.host,
+            "port": self.port,
+            "db_type": db_type,
+            "completed_phases": completed_phases,
+            "db_version": db_version,
+            "auth_success": auth_success,
+            "generated_at": self._ts(),
+        }
+        self.checkpoint_json.write_text(json.dumps(cp, indent=2), encoding="utf-8")
+
+    def load_checkpoint(self) -> dict:
+        if not self.checkpoint_json.exists():
+            return {}
+        try:
+            return json.loads(self.checkpoint_json.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+
+# ---------------------------------------------------------------------------
+# Network / TLS helpers
+# ---------------------------------------------------------------------------
+def _tcp_open(host: str, port: int, timeout: float = 5.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _tls_info(host: str, port: int, timeout: float = 8.0) -> dict:
+    """Return TLS information for the given host:port without sending DB handshake."""
+    result = {"tls_ok": False, "version": None, "cipher": None,
+              "cert_subject": None, "cert_issuer": None, "cert_expired": False,
+              "self_signed": False, "weak_version": False, "weak_cipher": False,
+              "error": ""}
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                ver    = s.version()
+                cipher = s.cipher()
+                cert   = s.getpeercert()
+                result["tls_ok"]     = True
+                result["version"]    = ver
+                result["cipher"]     = cipher[0] if cipher else ""
+                if cert:
+                    subj = dict(x[0] for x in cert.get("subject", []))
+                    issu = dict(x[0] for x in cert.get("issuer", []))
+                    result["cert_subject"] = subj.get("commonName", "")
+                    result["cert_issuer"]  = issu.get("commonName", "")
+                    result["self_signed"]  = (subj == issu)
+                    exp = cert.get("notAfter", "")
+                    if exp:
+                        import email.utils
+                        import calendar
+                        result["cert_expired"] = (
+                            calendar.timegm(email.utils.parsedate(exp)) < time.time()
+                        )
+                result["weak_version"] = ver in ("TLSv1", "TLSv1.1", "SSLv3", "SSLv2")
+                cn = (cipher[0] or "").upper() if cipher else ""
+                result["weak_cipher"]  = any(w in cn for w in
+                    ("RC4", "DES", "EXP", "NULL", "ANON", "3DES", "ADH", "AECDH"))
+    except ssl.SSLError as e:
+        result["error"] = str(e)
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _grab_banner(host: str, port: int, probe: bytes = b"", timeout: float = 4.0) -> str:
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            if probe:
+                s.sendall(probe)
+            s.settimeout(2.0)
+            data = b""
+            for _ in range(10):
+                try:
+                    chunk = s.recv(512)
+                    if not chunk:
+                        break
+                    data += chunk
+                except socket.timeout:
+                    break
+            return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# JDBC connection string parser
+# ---------------------------------------------------------------------------
+def _parse_jdbc(jdbc: str) -> dict:
+    """
+    Parse JDBC URL into {db_type, host, port, database, params}.
+    Handles: jdbc:mysql, jdbc:postgresql, jdbc:sqlserver, jdbc:oracle:thin,
+             jdbc:mongodb, jdbc:redshift
+    """
+    result = {"db_type": "", "host": "", "port": 0, "database": "", "params": {}}
+    if not jdbc or not jdbc.startswith("jdbc:"):
+        return result
+    rest = jdbc[5:]
+    m = re.match(r'^([a-z]+):(?:thin:)?(?://)?([^:/;?]+)(?::(\d+))?[/;:]?([^?;]*)',
+                 rest, re.IGNORECASE)
+    if not m:
+        return result
+    db_type = m.group(1).lower()
+    if "sqlserver" in db_type or "mssql" in db_type or "jtds" in db_type:
+        db_type = "mssql"
+    elif "oracle" in db_type:
+        db_type = "oracle"
+    elif "postgresql" in db_type or "redshift" in db_type:
+        db_type = "postgresql" if "postgresql" in db_type else "redshift"
+    result["db_type"]   = db_type
+    result["host"]      = m.group(2) or ""
+    result["port"]      = int(m.group(3)) if m.group(3) else _default_port(db_type)
+    result["database"]  = (m.group(4) or "").lstrip("/")
+    qs = rest.split("?", 1)
+    if len(qs) > 1:
+        for kv in qs[1].split("&"):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                result["params"][k] = v
+    return result
+
+
+def _default_port(db_type: str) -> int:
+    _ports = {
+        "mysql": 3306, "mariadb": 3306, "postgresql": 5432, "postgres": 5432,
+        "mssql": 1433, "oracle": 1521, "mongodb": 27017, "redis": 6379,
+        "cassandra": 9042, "elasticsearch": 9200, "couchdb": 5984,
+        "influxdb": 8086, "neo4j": 7474, "memcached": 11211,
+        "redshift": 5439, "dynamodb": 8000,
+    }
+    return _ports.get(db_type, 0)
+
+
+# ---------------------------------------------------------------------------
+# Database connector helpers  (optional imports)
+# ---------------------------------------------------------------------------
+def _try_import(module: str, package: str = ""):
+    try:
+        import importlib
+        return importlib.import_module(module)
+    except ImportError:
+        pkg = package or module
+        _console.log(f"Optional dependency '{pkg}' not installed — some checks skipped", "WARNING")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# MySQL / MariaDB Auditor
+# ---------------------------------------------------------------------------
+class MySQLAuditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database or "information_schema"
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._conn    = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        pymysql = _try_import("pymysql")
+        if not pymysql:
+            return False
+        try:
+            ssl_cfg = {"ssl_disabled": not self.ssl_en}
+            self._conn = pymysql.connect(
+                host=self.host, port=self.port,
+                user=self.username, password=self.password,
+                database=self.database, connect_timeout=self.timeout,
+                **ssl_cfg
+            )
+            return True
+        except Exception as e:
+            _console.log(f"MySQL connect failed: {e}", "ERROR")
+            return False
+
+    def _q(self, sql: str, args=None) -> list:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(sql, args or ())
+                return cur.fetchall()
+        except Exception as e:
+            self.out.log_error("mysql-query", str(e))
+            return []
+
+    def _q1(self, sql: str, args=None):
+        rows = self._q(sql, args)
+        return rows[0] if rows else None
+
+    def _var(self, name: str) -> str:
+        row = self._q1("SHOW VARIABLES LIKE %s", (name,))
+        return (row[1] if row else "").strip().lower()
+
+    def check_version(self) -> str:
+        row = self._q1("SELECT VERSION()")
+        if not row:
+            return ""
+        ver = str(row[0])
+        self._version = ver
+        self.out.log_step(f"MySQL version: {ver}")
+        # Determine if MariaDB
+        db_type = "mariadb" if "mariadb" in ver.lower() else "mysql"
+        major_minor = ".".join(ver.split(".")[:2])
+        eol = _EOL_VERSIONS.get(db_type, {}).get(major_minor, False)
+        if eol:
+            self.out.add_finding(
+                title=f"End-of-Life MySQL/MariaDB Version: {ver}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"The database is running version {ver} which is past end-of-life.",
+                output=f"VERSION(): {ver}", db_version=ver,
+                command="SELECT VERSION()"
+            )
+        # CVE check
+        for cve in _KNOWN_CVES.get(db_type, []):
+            if any(ver.startswith(v) for v in cve["versions"]):
+                self.out.add_finding(
+                    title=f"Known CVE in MySQL Version: {cve['cve']}",
+                    risk="HIGH", phase="version", catalogue_id="DB-010",
+                    description=cve["desc"],
+                    output=f"Version: {ver}  CVE: {cve['cve']}  CVSS: {cve['cvss']}",
+                    cves=cve["cve"], db_version=ver,
+                    command="SELECT VERSION()"
+                )
+        return ver
+
+    def check_anonymous_users(self):
+        rows = self._q("SELECT user, host FROM mysql.user WHERE user=''")
+        if rows:
+            self.out.add_finding(
+                title="MySQL: Anonymous User Account Present",
+                risk="HIGH", phase="accounts", catalogue_id="DB-100",
+                description="Anonymous (blank username) accounts exist allowing unauthenticated access.",
+                output=str(rows),
+                command="SELECT user, host FROM mysql.user WHERE user=''",
+                db_version=self._version
+            )
+
+    def check_test_database(self):
+        rows = self._q("SHOW DATABASES LIKE 'test'")
+        if rows:
+            self.out.add_finding(
+                title="MySQL: Test Database Present and Accessible",
+                risk="MEDIUM", phase="config", catalogue_id="DB-101",
+                description="The default 'test' database is present and accessible.",
+                output="Database 'test' exists",
+                command="SHOW DATABASES LIKE 'test'",
+                db_version=self._version
+            )
+
+    def check_local_infile(self):
+        val = self._var("local_infile")
+        if val in ("on", "1", "yes"):
+            self.out.add_finding(
+                title="MySQL: LOCAL INFILE Enabled",
+                risk="HIGH", phase="config", catalogue_id="DB-102",
+                description="local_infile=ON allows reading client-side files.",
+                output=f"local_infile = {val}",
+                command="SHOW VARIABLES LIKE 'local_infile'",
+                db_version=self._version
+            )
+
+    def check_secure_file_priv(self):
+        val = self._var("secure_file_priv")
+        if val == "" or val == "null":
+            risk = "HIGH" if val == "" else "INFO"
+            self.out.add_finding(
+                title="MySQL: secure_file_priv Not Configured",
+                risk=risk, phase="config", catalogue_id="DB-103",
+                description="secure_file_priv is empty — file read/write operations are unrestricted.",
+                output=f"secure_file_priv = '{val}'",
+                command="SHOW VARIABLES LIKE 'secure_file_priv'",
+                db_version=self._version
+            )
+
+    def check_root_remote(self):
+        rows = self._q(
+            "SELECT user, host FROM mysql.user WHERE user='root' AND host NOT IN ('localhost','127.0.0.1','::1')"
+        )
+        if rows:
+            self.out.add_finding(
+                title="MySQL: Root Account Accessible Remotely",
+                risk="CRITICAL", phase="accounts", catalogue_id="DB-104",
+                description="Root account has remote host entries allowing external connections.",
+                output=str(rows),
+                command="SELECT user,host FROM mysql.user WHERE user='root' AND host NOT IN ('localhost','127.0.0.1','::1')",
+                db_version=self._version
+            )
+
+    def check_wildcard_hosts(self):
+        rows = self._q(
+            "SELECT user, host FROM mysql.user WHERE host='%' AND user!='' ORDER BY user"
+        )
+        if rows:
+            self.out.add_finding(
+                title="MySQL: User Account with Wildcard Host (%)",
+                risk="HIGH", phase="accounts", catalogue_id="DB-105",
+                description=f"Accounts with wildcard hosts: {[r[0] for r in rows]}",
+                output=str(rows),
+                command="SELECT user,host FROM mysql.user WHERE host='%'",
+                db_version=self._version
+            )
+
+    def check_password_policy(self):
+        # Try component first (MySQL 8.0+), then plugin (5.7)
+        row = self._q1(
+            "SELECT variable_value FROM performance_schema.global_variables "
+            "WHERE variable_name='validate_password.policy'"
+        )
+        if not row:
+            row = self._q1("SHOW VARIABLES LIKE 'validate_password_policy'")
+            val = row[1] if row else None
+        else:
+            val = row[0]
+        if val is None:
+            self.out.add_finding(
+                title="MySQL: Password Validation Plugin Not Installed",
+                risk="HIGH", phase="config", catalogue_id="DB-106",
+                description="No password validation plugin/component found.",
+                output="validate_password not installed",
+                command="SHOW VARIABLES LIKE 'validate_password%'",
+                db_version=self._version
+            )
+        elif str(val).upper() in ("LOW", "0"):
+            self.out.add_finding(
+                title="MySQL: Password Validation Policy Set to LOW",
+                risk="MEDIUM", phase="config",
+                description="validate_password.policy=LOW only checks length, not complexity.",
+                output=f"validate_password.policy = {val}",
+                command="SHOW VARIABLES LIKE 'validate_password.policy'",
+                owasp="A07:2021", owasp_asvs="V2.1.2", nist="IA-5",
+                pci_dss="8.3.6", db_version=self._version
+            )
+
+    def check_general_log(self):
+        val = self._var("general_log")
+        if val in ("on", "1"):
+            path = self._var("general_log_file")
+            self.out.add_finding(
+                title="MySQL: General Query Log Enabled",
+                risk="LOW", phase="logging", catalogue_id="DB-107",
+                description=f"General log is ON — queries (including passwords in plain-text) are logged to {path}.",
+                output=f"general_log=ON  general_log_file={path}",
+                command="SHOW VARIABLES LIKE 'general_log%'",
+                db_version=self._version
+            )
+
+    def check_ssl_config(self):
+        ssl_val = self._var("have_ssl")
+        tls_req = self._var("require_secure_transport")
+        if ssl_val != "yes":
+            self.out.add_finding(
+                title="Cleartext Database Protocol (No TLS/SSL)",
+                risk="HIGH", phase="network", catalogue_id="DB-001",
+                description="MySQL SSL/TLS is not enabled.",
+                output=f"have_ssl = {ssl_val}",
+                command="SHOW VARIABLES LIKE 'have_ssl'",
+                db_version=self._version
+            )
+        elif tls_req not in ("on", "1"):
+            self.out.add_finding(
+                title="MySQL: TLS Not Required (Optional Only)",
+                risk="MEDIUM", phase="network",
+                description="SSL is available but require_secure_transport=OFF — clients can connect without TLS.",
+                output=f"have_ssl={ssl_val}  require_secure_transport={tls_req}",
+                command="SHOW VARIABLES LIKE 'require_secure_transport'",
+                owasp="A02:2021", owasp_asvs="V9.1.1", nist="SC-8",
+                pci_dss="4.2.1", hipaa="164.312(e)(1)", db_version=self._version
+            )
+
+    def check_symlinks(self):
+        val = self._var("have_symlink")
+        if val == "yes":
+            self.out.add_finding(
+                title="MySQL: Symlink Support Enabled",
+                risk="MEDIUM", phase="config", catalogue_id="DB-108",
+                description="have_symlink=YES — MySQL follows symlinks to table files.",
+                output=f"have_symlink = {val}",
+                command="SHOW VARIABLES LIKE 'have_symlink'",
+                db_version=self._version
+            )
+
+    def check_bind_address(self):
+        val = self._var("bind_address")
+        if val in ("0.0.0.0", "::", "*", ""):
+            self.out.add_finding(
+                title="Database Listening on All Network Interfaces (0.0.0.0)",
+                risk="HIGH", phase="config", catalogue_id="DB-004",
+                description=f"MySQL bind_address={val!r} — listening on all interfaces.",
+                output=f"bind_address = {val}",
+                command="SHOW VARIABLES LIKE 'bind_address'",
+                db_version=self._version
+            )
+
+    def check_user_privileges(self):
+        rows = self._q(
+            "SELECT user, host, Super_priv, File_priv, Process_priv, "
+            "Shutdown_priv, Reload_priv, Grant_priv "
+            "FROM mysql.user WHERE user!='' AND "
+            "(Super_priv='Y' OR File_priv='Y') ORDER BY user"
+        )
+        for row in rows:
+            user, host = row[0], row[1]
+            super_p = row[2] == "Y"
+            file_p  = row[3] == "Y"
+            privs   = []
+            if super_p: privs.append("SUPER")
+            if file_p:  privs.append("FILE")
+            if privs and user.lower() not in ("root",):
+                self.out.add_finding(
+                    title=f"MySQL: Overprivileged Account '{user}'@'{host}'",
+                    risk="HIGH", phase="permissions", catalogue_id="DB-011",
+                    description=f"Account '{user}'@'{host}' has dangerous privileges: {', '.join(privs)}",
+                    output=f"user={user} host={host} privileges={privs}",
+                    command="SELECT user,host,Super_priv,File_priv FROM mysql.user",
+                    db_version=self._version
+                )
+
+    def check_sql_mode(self):
+        val = self._var("sql_mode")
+        missing = []
+        for required in ("STRICT_TRANS_TABLES", "NO_BACKSLASH_ESCAPES"):
+            if required not in val.upper():
+                missing.append(required)
+        if missing:
+            self.out.add_finding(
+                title="MySQL: sql_mode Too Permissive",
+                risk="LOW", phase="config", catalogue_id="DB-110",
+                description=f"sql_mode is missing recommended values: {missing}",
+                output=f"sql_mode = {val}",
+                command="SHOW VARIABLES LIKE 'sql_mode'",
+                db_version=self._version
+            )
+
+    def check_error_log(self):
+        val = self._var("log_error")
+        if val in ("", "off", "0"):
+            self.out.add_finding(
+                title="Audit Logging Disabled",
+                risk="HIGH", phase="logging", catalogue_id="DB-005",
+                description="MySQL error logging is disabled.",
+                output=f"log_error = {val!r}",
+                command="SHOW VARIABLES LIKE 'log_error'",
+                db_version=self._version
+            )
+
+    def check_default_creds(self):
+        """Try well-known default credentials as a verification check."""
+        pymysql = _try_import("pymysql")
+        if not pymysql:
+            return
+        for user, pwd in _DEFAULT_CREDS["mysql"]:
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                c = pymysql.connect(host=self.host, port=self.port,
+                                    user=user, password=pwd,
+                                    connect_timeout=4, ssl={"ssl_disabled": True})
+                c.close()
+                self.out.add_finding(
+                    title="Default Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Successfully authenticated with default credentials: {user}/{pwd!r}",
+                    output=f"user={user} password={'(empty)' if pwd=='' else '***'}",
+                    command=f"mysql -h {self.host} -P {self.port} -u {user} -p{pwd}",
+                    db_version=self._version
+                )
+                break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_default_creds, "auth"),
+            (self.check_anonymous_users, "accounts"),
+            (self.check_test_database, "config"),
+            (self.check_local_infile, "config"),
+            (self.check_secure_file_priv, "config"),
+            (self.check_root_remote, "accounts"),
+            (self.check_wildcard_hosts, "accounts"),
+            (self.check_password_policy, "config"),
+            (self.check_general_log, "logging"),
+            (self.check_ssl_config, "network"),
+            (self.check_symlinks, "config"),
+            (self.check_bind_address, "config"),
+            (self.check_user_privileges, "permissions"),
+            (self.check_sql_mode, "config"),
+            (self.check_error_log, "logging"),
+        ]:
+            _console.status("mysql", label=f"MySQL {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL Auditor
+# ---------------------------------------------------------------------------
+class PostgreSQLAuditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database or "postgres"
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._conn    = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        psycopg2 = _try_import("psycopg2")
+        if not psycopg2:
+            return False
+        try:
+            ssl_mode = "require" if self.ssl_en else "prefer"
+            self._conn = psycopg2.connect(
+                host=self.host, port=self.port,
+                user=self.username, password=self.password,
+                dbname=self.database, connect_timeout=self.timeout,
+                sslmode=ssl_mode
+            )
+            self._conn.autocommit = True
+            return True
+        except Exception as e:
+            _console.log(f"PostgreSQL connect failed: {e}", "ERROR")
+            return False
+
+    def _q(self, sql: str, args=None) -> list:
+        try:
+            import psycopg2.extras
+            with self._conn.cursor() as cur:
+                cur.execute(sql, args)
+                return cur.fetchall()
+        except Exception as e:
+            self.out.log_error("pg-query", str(e))
+            return []
+
+    def _q1(self, sql, args=None):
+        rows = self._q(sql, args)
+        return rows[0] if rows else None
+
+    def check_version(self) -> str:
+        row = self._q1("SELECT version()")
+        if not row:
+            return ""
+        ver_str = str(row[0])
+        self._version = ver_str
+        m = re.search(r'PostgreSQL\s+([\d.]+)', ver_str, re.I)
+        ver_num = m.group(1) if m else ver_str
+        self.out.log_step(f"PostgreSQL version: {ver_num}")
+        major = ver_num.split(".")[0]
+        eol = _EOL_VERSIONS.get("postgresql", {}).get(ver_num[:3], False)
+        eol = eol or _EOL_VERSIONS.get("postgresql", {}).get(major, False)
+        if eol:
+            self.out.add_finding(
+                title=f"End-of-Life PostgreSQL Version: {ver_num}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"PostgreSQL {ver_num} is end-of-life.",
+                output=ver_str, db_version=ver_num,
+                command="SELECT version()"
+            )
+        for cve in _KNOWN_CVES.get("postgresql", []):
+            if any(ver_num.startswith(v) for v in cve["versions"]):
+                self.out.add_finding(
+                    title=f"Known CVE in PostgreSQL Version: {cve['cve']}",
+                    risk="HIGH", phase="version", catalogue_id="DB-010",
+                    description=cve["desc"],
+                    output=f"Version: {ver_num}  CVE: {cve['cve']}  CVSS: {cve['cvss']}",
+                    cves=cve["cve"], db_version=ver_num, command="SELECT version()"
+                )
+        return ver_num
+
+    def _setting(self, name: str) -> str:
+        row = self._q1("SELECT current_setting(%s)", (name,))
+        return str(row[0]).strip().lower() if row else ""
+
+    def check_ssl(self):
+        val = self._setting("ssl")
+        if val == "off":
+            self.out.add_finding(
+                title="Cleartext Database Protocol (No TLS/SSL)",
+                risk="HIGH", phase="network", catalogue_id="DB-001",
+                description="PostgreSQL ssl=off — all connections are unencrypted.",
+                output="ssl = off", command="SHOW ssl",
+                db_version=self._version
+            )
+
+    def check_password_encryption(self):
+        val = self._setting("password_encryption")
+        if "md5" in val:
+            self.out.add_finding(
+                title="PostgreSQL: Weak Password Encryption (MD5)",
+                risk="MEDIUM", phase="config", catalogue_id="DB-154",
+                description="password_encryption=md5 — use scram-sha-256 instead.",
+                output=f"password_encryption = {val}",
+                command="SHOW password_encryption",
+                db_version=self._version
+            )
+
+    def check_superusers(self):
+        rows = self._q("SELECT usename, usesuper, usecreatedb FROM pg_user WHERE usesuper=true")
+        if rows:
+            users = [r[0] for r in rows]
+            if len(users) > 1 or (users and users[0] not in ("postgres",)):
+                self.out.add_finding(
+                    title="PostgreSQL: Superuser Account Accessible Remotely",
+                    risk="HIGH", phase="accounts", catalogue_id="DB-151",
+                    description=f"Superuser accounts: {users}. Verify remote access is restricted in pg_hba.conf.",
+                    output=f"Superusers: {users}",
+                    command="SELECT usename FROM pg_user WHERE usesuper=true",
+                    validation_required=True,
+                    validation_notes="Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
+                    db_version=self._version
+                )
+
+    def check_public_schema_perms(self):
+        rows = self._q(
+            "SELECT has_schema_privilege('public', 'public', 'CREATE')"
+        )
+        if rows and rows[0][0]:
+            self.out.add_finding(
+                title="PostgreSQL: Excessive Permissions on Public Schema",
+                risk="MEDIUM", phase="permissions", catalogue_id="DB-155",
+                description="PUBLIC role has CREATE on public schema — CVE-2018-1058 search_path attack vector.",
+                output="has_schema_privilege('public', 'public', 'CREATE') = true",
+                command="SELECT has_schema_privilege('public','public','CREATE')",
+                db_version=self._version
+            )
+
+    def check_row_security(self):
+        rows = self._q(
+            "SELECT schemaname, tablename FROM pg_tables "
+            "WHERE rowsecurity = false AND schemaname NOT IN ('pg_catalog','information_schema') "
+            "AND tablename ~* '(user|account|customer|patient|member|person|employee|"
+            "card|payment|credit|ssn|health|record|secret|token|password|credential)'"
+        )
+        if rows:
+            tables = [f"{r[0]}.{r[1]}" for r in rows[:10]]
+            self.out.add_finding(
+                title="PostgreSQL: Row-Level Security Not Enabled on Sensitive Tables",
+                risk="HIGH", phase="permissions", catalogue_id="DB-153",
+                description=f"Tables with sensitive-looking names without RLS: {tables}",
+                output=str(tables),
+                command="SELECT schemaname,tablename FROM pg_tables WHERE rowsecurity=false",
+                db_version=self._version
+            )
+
+    def check_logging(self):
+        log_conn = self._setting("log_connections")
+        log_disc = self._setting("log_disconnections")
+        if log_conn == "off" or log_disc == "off":
+            self.out.add_finding(
+                title="PostgreSQL: Connection Logging Disabled",
+                risk="MEDIUM", phase="logging", catalogue_id="DB-156",
+                description=f"log_connections={log_conn}  log_disconnections={log_disc}",
+                output=f"log_connections={log_conn}, log_disconnections={log_disc}",
+                command="SHOW log_connections; SHOW log_disconnections",
+                db_version=self._version
+            )
+
+    def check_extensions(self):
+        risky = {"dblink", "pg_read_file", "plsh", "plpython3u", "plpython2u",
+                 "plperlu", "adminpack", "pg_read_server_files"}
+        rows = self._q(
+            "SELECT extname FROM pg_extension WHERE extname = ANY(%s)",
+            (list(risky),)
+        )
+        if rows:
+            found = [r[0] for r in rows]
+            self.out.add_finding(
+                title="PostgreSQL: Dangerous Extensions Installed",
+                risk="HIGH", phase="config", catalogue_id="DB-157",
+                description=f"Potentially dangerous extensions found: {found}",
+                output=str(found),
+                command="SELECT extname FROM pg_extension",
+                db_version=self._version
+            )
+
+    def check_default_creds(self):
+        psycopg2 = _try_import("psycopg2")
+        if not psycopg2:
+            return
+        for user, pwd in _DEFAULT_CREDS["postgresql"]:
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                c = psycopg2.connect(host=self.host, port=self.port,
+                                     user=user, password=pwd,
+                                     dbname="postgres", connect_timeout=4,
+                                     sslmode="prefer")
+                c.close()
+                self.out.add_finding(
+                    title="Default Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Authenticated with default credentials: {user}/{pwd!r}",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"psql -h {self.host} -p {self.port} -U {user}"
+                )
+                break
+            except Exception:
+                pass
+
+    def check_copy_program(self):
+        # If we are superuser, this is accessible
+        row = self._q1("SELECT usesuper FROM pg_user WHERE usename = current_user")
+        if row and row[0]:
+            self.out.add_finding(
+                title="PostgreSQL: COPY TO/FROM PROGRAM Feature Accessible",
+                risk="CRITICAL", phase="config", catalogue_id="DB-152",
+                description="Connected user has superuser — COPY FROM PROGRAM provides OS command execution.",
+                output="Current user is superuser",
+                command="SELECT usesuper FROM pg_user WHERE usename=current_user",
+                db_version=self._version
+            )
+
+    def check_listen_addresses(self):
+        val = self._setting("listen_addresses")
+        if val in ("*", "0.0.0.0"):
+            self.out.add_finding(
+                title="Database Listening on All Network Interfaces (0.0.0.0)",
+                risk="HIGH", phase="config", catalogue_id="DB-004",
+                description=f"PostgreSQL listen_addresses={val!r}",
+                output=f"listen_addresses = {val}",
+                command="SHOW listen_addresses", db_version=self._version
+            )
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_default_creds, "auth"),
+            (self.check_ssl, "network"),
+            (self.check_password_encryption, "config"),
+            (self.check_superusers, "accounts"),
+            (self.check_public_schema_perms, "permissions"),
+            (self.check_row_security, "permissions"),
+            (self.check_logging, "logging"),
+            (self.check_extensions, "config"),
+            (self.check_copy_program, "config"),
+            (self.check_listen_addresses, "config"),
+        ]:
+            _console.status("postgresql", label=f"PostgreSQL {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# MSSQL Auditor
+# ---------------------------------------------------------------------------
+class MSSQLAuditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 timeout=15):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database or "master"
+        self.out      = out
+        self.timeout  = timeout
+        self._conn    = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        pymssql = _try_import("pymssql")
+        if not pymssql:
+            # Try pyodbc
+            pyodbc = _try_import("pyodbc")
+            if not pyodbc:
+                return False
+            try:
+                conn_str = (
+                    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+                    f"SERVER={self.host},{self.port};DATABASE={self.database};"
+                    f"UID={self.username};PWD={self.password};"
+                    f"TrustServerCertificate=yes;LoginTimeout={self.timeout}"
+                )
+                self._conn = pyodbc.connect(conn_str)
+                return True
+            except Exception as e:
+                _console.log(f"MSSQL pyodbc connect failed: {e}", "ERROR")
+                return False
+        try:
+            self._conn = pymssql.connect(
+                server=self.host, port=str(self.port),
+                user=self.username, password=self.password,
+                database=self.database, login_timeout=self.timeout
+            )
+            return True
+        except Exception as e:
+            _console.log(f"MSSQL connect failed: {e}", "ERROR")
+            return False
+
+    def _q(self, sql: str) -> list:
+        try:
+            cur = self._conn.cursor()
+            cur.execute(sql)
+            return cur.fetchall()
+        except Exception as e:
+            self.out.log_error("mssql-query", str(e))
+            return []
+
+    def _q1(self, sql):
+        rows = self._q(sql)
+        return rows[0] if rows else None
+
+    def _sp_config(self, option: str) -> int:
+        rows = self._q(
+            f"EXEC sp_configure 'show advanced options', 1; RECONFIGURE; "
+            f"SELECT value_in_use FROM sys.configurations WHERE name='{option}'"
+        )
+        if rows:
+            return int(rows[0][0])
+        return -1
+
+    def check_version(self) -> str:
+        row = self._q1("SELECT @@VERSION")
+        if not row:
+            return ""
+        ver = str(row[0])
+        self._version = ver
+        self.out.log_step(f"MSSQL version: {ver[:80]}")
+        m = re.search(r'(\d{4})', ver)
+        yr = m.group(1) if m else ""
+        if yr and _EOL_VERSIONS.get("mssql", {}).get(yr, False):
+            self.out.add_finding(
+                title=f"End-of-Life MSSQL Version: SQL Server {yr}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"SQL Server {yr} is end-of-life.",
+                output=ver[:200], db_version=yr, command="SELECT @@VERSION"
+            )
+        return ver
+
+    def check_xp_cmdshell(self):
+        rows = self._q(
+            "SELECT value_in_use FROM sys.configurations WHERE name='xp_cmdshell'"
+        )
+        if rows and int(rows[0][0]) == 1:
+            self.out.add_finding(
+                title="MSSQL: xp_cmdshell Enabled",
+                risk="CRITICAL", phase="config", catalogue_id="DB-200",
+                description="xp_cmdshell is enabled — OS command execution possible from T-SQL.",
+                output="xp_cmdshell value_in_use = 1",
+                command="SELECT value_in_use FROM sys.configurations WHERE name='xp_cmdshell'",
+                db_version=self._version
+            )
+
+    def check_sa_account(self):
+        rows = self._q(
+            "SELECT name, is_disabled FROM sys.server_principals WHERE name='sa'"
+        )
+        if rows and rows[0][1] == 0:
+            self.out.add_finding(
+                title="MSSQL: SA Account Enabled",
+                risk="HIGH", phase="accounts", catalogue_id="DB-201",
+                description="The 'sa' built-in account is enabled.",
+                output="sa account is_disabled=0",
+                command="SELECT name,is_disabled FROM sys.server_principals WHERE name='sa'",
+                db_version=self._version
+            )
+
+    def check_clr(self):
+        rows = self._q(
+            "SELECT value_in_use FROM sys.configurations WHERE name='clr enabled'"
+        )
+        if rows and int(rows[0][0]) == 1:
+            self.out.add_finding(
+                title="MSSQL: CLR Integration Enabled",
+                risk="HIGH", phase="config", catalogue_id="DB-202",
+                description="CLR integration is enabled — .NET assemblies can run in SQL Server.",
+                output="clr enabled = 1",
+                command="SELECT value_in_use FROM sys.configurations WHERE name='clr enabled'",
+                db_version=self._version
+            )
+
+    def check_ole_automation(self):
+        rows = self._q(
+            "SELECT value_in_use FROM sys.configurations WHERE name='Ole Automation Procedures'"
+        )
+        if rows and int(rows[0][0]) == 1:
+            self.out.add_finding(
+                title="MSSQL: OLE Automation Procedures Enabled",
+                risk="CRITICAL", phase="config", catalogue_id="DB-203",
+                description="OLE Automation Procedures enabled — COM/OLE objects accessible from T-SQL.",
+                output="Ole Automation Procedures = 1",
+                command="SELECT value_in_use FROM sys.configurations WHERE name='Ole Automation Procedures'",
+                db_version=self._version
+            )
+
+    def check_linked_servers(self):
+        rows = self._q(
+            "SELECT name, data_source, provider FROM sys.servers WHERE is_linked=1"
+        )
+        if rows:
+            ls = [r[0] for r in rows]
+            self.out.add_finding(
+                title="MSSQL: Linked Servers Configured",
+                risk="HIGH", phase="config", catalogue_id="DB-204",
+                description=f"Linked servers found: {ls}",
+                output=str(rows)[:500],
+                command="SELECT name FROM sys.servers WHERE is_linked=1",
+                db_version=self._version
+            )
+
+    def check_builtin_admins(self):
+        rows = self._q(
+            "SELECT m.name FROM sys.server_role_members rm "
+            "JOIN sys.server_principals m ON rm.member_principal_id=m.principal_id "
+            "JOIN sys.server_principals r ON rm.role_principal_id=r.principal_id "
+            "WHERE r.name='sysadmin' AND m.name LIKE 'BUILTIN%'"
+        )
+        if rows:
+            self.out.add_finding(
+                title="MSSQL: BUILTIN\\Administrators in Sysadmin Role",
+                risk="HIGH", phase="permissions", catalogue_id="DB-206",
+                description=f"BUILTIN accounts with sysadmin: {[r[0] for r in rows]}",
+                output=str(rows),
+                command="Query sys.server_role_members for BUILTIN sysadmin members",
+                db_version=self._version
+            )
+
+    def check_password_policy(self):
+        rows = self._q(
+            "SELECT name, is_policy_checked, is_expiration_checked "
+            "FROM sys.sql_logins WHERE is_policy_checked=0 OR is_expiration_checked=0"
+        )
+        if rows:
+            logins = [r[0] for r in rows]
+            self.out.add_finding(
+                title="MSSQL: Mixed Mode Authentication with SQL Logins Not Subject to Password Policy",
+                risk="HIGH", phase="config", catalogue_id="DB-205",
+                description=f"SQL logins without policy/expiry check: {logins}",
+                output=str(rows)[:500],
+                command="SELECT name,is_policy_checked FROM sys.sql_logins",
+                db_version=self._version
+            )
+
+    def check_tde(self):
+        rows = self._q(
+            "SELECT db.name FROM sys.databases db "
+            "LEFT JOIN sys.dm_database_encryption_keys ek ON db.database_id=ek.database_id "
+            "WHERE db.name NOT IN ('master','tempdb','model','msdb') "
+            "AND (ek.encryption_state IS NULL OR ek.encryption_state=1)"
+        )
+        if rows:
+            dbs = [r[0] for r in rows]
+            self.out.add_finding(
+                title="MSSQL: Transparent Data Encryption (TDE) Not Enabled",
+                risk="HIGH", phase="crypto", catalogue_id="DB-207",
+                description=f"Databases without TDE: {dbs}",
+                output=str(dbs),
+                command="Query sys.dm_database_encryption_keys",
+                db_version=self._version
+            )
+
+    def check_ad_hoc_queries(self):
+        rows = self._q(
+            "SELECT value_in_use FROM sys.configurations WHERE name='Ad Hoc Distributed Queries'"
+        )
+        if rows and int(rows[0][0]) == 1:
+            self.out.add_finding(
+                title="MSSQL: Ad Hoc Distributed Queries Enabled",
+                risk="HIGH", phase="config", catalogue_id="DB-208",
+                description="Ad Hoc Distributed Queries enabled — OPENROWSET/OPENDATASOURCE accessible.",
+                output="Ad Hoc Distributed Queries = 1",
+                command="SELECT value_in_use FROM sys.configurations WHERE name='Ad Hoc Distributed Queries'",
+                db_version=self._version
+            )
+
+    def check_database_mail(self):
+        rows = self._q(
+            "SELECT value_in_use FROM sys.configurations WHERE name='Database Mail XPs'"
+        )
+        if rows and int(rows[0][0]) == 1:
+            self.out.add_finding(
+                title="MSSQL: Database Mail Enabled",
+                risk="LOW", phase="config",
+                description="Database Mail XPs are enabled. Review if required.",
+                output="Database Mail XPs = 1",
+                command="SELECT value_in_use FROM sys.configurations WHERE name='Database Mail XPs'",
+                owasp="A05:2021", nist="CM-7", iso_27001="A.8.9",
+                db_version=self._version
+            )
+
+    def check_default_creds(self):
+        pymssql = _try_import("pymssql")
+        if not pymssql:
+            return
+        for user, pwd in _DEFAULT_CREDS["mssql"]:
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                c = pymssql.connect(server=self.host, port=str(self.port),
+                                    user=user, password=pwd,
+                                    database="master", login_timeout=4)
+                c.close()
+                self.out.add_finding(
+                    title="Default Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Authenticated with default credentials: {user}",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"sqlcmd -S {self.host},{self.port} -U {user} -P ***"
+                )
+                break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_default_creds, "auth"),
+            (self.check_xp_cmdshell, "config"),
+            (self.check_sa_account, "accounts"),
+            (self.check_clr, "config"),
+            (self.check_ole_automation, "config"),
+            (self.check_linked_servers, "config"),
+            (self.check_builtin_admins, "permissions"),
+            (self.check_password_policy, "config"),
+            (self.check_tde, "crypto"),
+            (self.check_ad_hoc_queries, "config"),
+            (self.check_database_mail, "config"),
+        ]:
+            _console.status("mssql", label=f"MSSQL {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# MongoDB Auditor
+# ---------------------------------------------------------------------------
+class MongoDBauditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database or "admin"
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._client  = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        pymongo = _try_import("pymongo")
+        if not pymongo:
+            return False
+        try:
+            from pymongo import MongoClient
+            from pymongo.errors import ServerSelectionTimeoutError
+            auth = ""
+            if self.username:
+                auth = f"{quote_plus(self.username)}:{quote_plus(self.password)}@"
+            tls = "/?tls=true" if self.ssl_en else ""
+            uri = f"mongodb://{auth}{self.host}:{self.port}/{self.database}{tls}"
+            self._client = MongoClient(
+                uri, serverSelectionTimeoutMS=self.timeout * 1000,
+                connectTimeoutMS=self.timeout * 1000
+            )
+            self._client.server_info()
+            return True
+        except Exception as e:
+            _console.log(f"MongoDB connect failed: {e}", "ERROR")
+            return False
+
+    def check_version(self) -> str:
+        try:
+            info = self._client.server_info()
+            ver = info.get("version", "")
+            self._version = ver
+            self.out.log_step(f"MongoDB version: {ver}")
+            major_minor = ".".join(ver.split(".")[:2])
+            if _EOL_VERSIONS.get("mongodb", {}).get(major_minor, False):
+                self.out.add_finding(
+                    title=f"End-of-Life MongoDB Version: {ver}",
+                    risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                    description=f"MongoDB {ver} is end-of-life.",
+                    output=f"version={ver}", db_version=ver,
+                    command="db.serverStatus()"
+                )
+            for cve in _KNOWN_CVES.get("mongodb", []):
+                if any(ver.startswith(v) for v in cve["versions"]):
+                    self.out.add_finding(
+                        title=f"Known CVE in MongoDB Version: {cve['cve']}",
+                        risk="HIGH", phase="version", catalogue_id="DB-010",
+                        description=cve["desc"], cves=cve["cve"],
+                        output=f"Version: {ver}", db_version=ver,
+                        command="db.serverStatus()"
+                    )
+            return ver
+        except Exception:
+            return ""
+
+    def check_auth_enabled(self):
+        try:
+            # Try connecting without credentials
+            from pymongo import MongoClient
+            test = MongoClient(
+                host=self.host, port=self.port,
+                serverSelectionTimeoutMS=4000
+            )
+            test.admin.command("ping")
+            # If no exception, auth is not required
+            self.out.add_finding(
+                title="MongoDB: Authentication Disabled",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-300",
+                description="MongoDB accepted connection without authentication.",
+                output=f"Connected to {self.host}:{self.port} without credentials",
+                command=f"mongo --host {self.host} --port {self.port}",
+                db_version=self._version
+            )
+            test.close()
+        except Exception:
+            pass  # Auth is working
+
+    def check_javascript(self):
+        try:
+            result = self._client.admin.command(
+                {"getParameter": 1, "javascriptEnabled": 1}
+            )
+            if result.get("javascriptEnabled", True):
+                self.out.add_finding(
+                    title="MongoDB: Server-Side JavaScript Execution Enabled",
+                    risk="MEDIUM", phase="config", catalogue_id="DB-301",
+                    description="Server-side JavaScript is enabled — $where, mapReduce available.",
+                    output="javascriptEnabled=true",
+                    command="db.adminCommand({getParameter:1,javascriptEnabled:1})",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_tls(self):
+        try:
+            result = self._client.admin.command("getCmdLineOpts")
+            opts = result.get("parsed", {}).get("net", {}).get("tls", {})
+            mode = opts.get("mode", "disabled")
+            if mode not in ("requireTLS", "allowTLS"):
+                self.out.add_finding(
+                    title="MongoDB: No TLS/SSL Configured",
+                    risk="HIGH", phase="network", catalogue_id="DB-302",
+                    description=f"MongoDB TLS mode={mode!r} — connections may be unencrypted.",
+                    output=f"net.tls.mode = {mode}",
+                    command="db.adminCommand('getCmdLineOpts')",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_users(self):
+        try:
+            result = self._client.admin.command("usersInfo", {"forAllDBs": True})
+            users = result.get("users", [])
+            for u in users:
+                for role in u.get("roles", []):
+                    if role.get("role") in ("root", "__system"):
+                        self.out.add_finding(
+                            title="MongoDB: User with Root or __system Role",
+                            risk="CRITICAL", phase="accounts", catalogue_id="DB-303",
+                            description=f"User {u['user']} has dangerous role: {role['role']}",
+                            output=f"user={u['user']} role={role['role']} db={role.get('db','')}",
+                            command="db.adminCommand({usersInfo:{forAllDBs:true}})",
+                            db_version=self._version
+                        )
+        except Exception:
+            pass
+
+    def check_bind_ip(self):
+        try:
+            result = self._client.admin.command("getCmdLineOpts")
+            bind = result.get("parsed", {}).get("net", {}).get("bindIp", "127.0.0.1")
+            if "0.0.0.0" in bind or bind == "":
+                self.out.add_finding(
+                    title="Database Listening on All Network Interfaces (0.0.0.0)",
+                    risk="HIGH", phase="config", catalogue_id="DB-004",
+                    description=f"MongoDB net.bindIp={bind!r}",
+                    output=f"net.bindIp = {bind}",
+                    command="db.adminCommand('getCmdLineOpts')",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_default_creds(self):
+        from pymongo import MongoClient
+        from pymongo.errors import OperationFailure
+        for user, pwd in _DEFAULT_CREDS["mongodb"]:
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                auth = f"{quote_plus(user)}:{quote_plus(pwd)}@" if user else ""
+                c = MongoClient(
+                    f"mongodb://{auth}{self.host}:{self.port}/admin",
+                    serverSelectionTimeoutMS=4000
+                )
+                c.admin.command("ping")
+                c.close()
+                self.out.add_finding(
+                    title="Default Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Authenticated with default credentials: {user}",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"mongo -u {user} -p *** --host {self.host}"
+                )
+                break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_auth_enabled, "auth"),
+            (self.check_default_creds, "auth"),
+            (self.check_javascript, "config"),
+            (self.check_tls, "network"),
+            (self.check_users, "accounts"),
+            (self.check_bind_ip, "config"),
+        ]:
+            _console.status("mongodb", label=f"MongoDB {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# Redis Auditor
+# ---------------------------------------------------------------------------
+class RedisAuditor:
+    def __init__(self, host, port, password, out: AugerOutput, ssl_enabled=False, timeout=5):
+        self.host     = host
+        self.port     = port
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._client  = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        redis = _try_import("redis")
+        if not redis:
+            return False
+        try:
+            self._client = redis.Redis(
+                host=self.host, port=self.port,
+                password=self.password or None,
+                ssl=self.ssl_en, socket_timeout=self.timeout,
+                socket_connect_timeout=self.timeout,
+                decode_responses=True
+            )
+            self._client.ping()
+            return True
+        except Exception as e:
+            _console.log(f"Redis connect failed: {e}", "ERROR")
+            return False
+
+    def check_version(self) -> str:
+        try:
+            info = self._client.info("server")
+            ver = info.get("redis_version", "")
+            self._version = ver
+            self.out.log_step(f"Redis version: {ver}")
+            major_minor = ".".join(ver.split(".")[:2])
+            if _EOL_VERSIONS.get("redis", {}).get(major_minor, False):
+                self.out.add_finding(
+                    title=f"End-of-Life Redis Version: {ver}",
+                    risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                    description=f"Redis {ver} is end-of-life.",
+                    output=f"redis_version={ver}", db_version=ver
+                )
+            for cve in _KNOWN_CVES.get("redis", []):
+                if any(ver.startswith(v) for v in cve["versions"]):
+                    self.out.add_finding(
+                        title=f"Known CVE in Redis Version: {cve['cve']}",
+                        risk="HIGH", phase="version", catalogue_id="DB-010",
+                        description=cve["desc"], cves=cve["cve"],
+                        output=f"Version: {ver}", db_version=ver
+                    )
+            return ver
+        except Exception:
+            return ""
+
+    def check_no_auth(self):
+        """Check if Redis is accessible without authentication."""
+        redis = _try_import("redis")
+        if not redis:
+            return
+        if self.password:
+            return
+        try:
+            r2 = redis.Redis(host=self.host, port=self.port, socket_timeout=4,
+                             decode_responses=True)
+            r2.ping()
+            self.out.add_finding(
+                title="Redis: No Authentication Configured (requirepass Not Set)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-350",
+                description="Redis is accessible without a password.",
+                output=f"Connected to {self.host}:{self.port} without credentials",
+                command=f"redis-cli -h {self.host} -p {self.port} ping",
+                db_version=self._version
+            )
+        except Exception:
+            pass
+
+    def check_protected_mode(self):
+        try:
+            pm = self._client.config_get("protected-mode")
+            if pm.get("protected-mode", "yes").lower() in ("no", "0", "false"):
+                self.out.add_finding(
+                    title="Redis: Protected Mode Disabled",
+                    risk="HIGH", phase="config", catalogue_id="DB-351",
+                    description="protected-mode=no — the safety layer is disabled.",
+                    output="protected-mode = no",
+                    command="redis-cli CONFIG GET protected-mode",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_dangerous_commands(self):
+        dangerous = ["FLUSHALL", "FLUSHDB", "DEBUG", "CONFIG", "SLAVEOF", "REPLICAOF"]
+        accessible = []
+        for cmd in dangerous:
+            try:
+                # Try a benign invocation or check via ACL
+                if cmd == "CONFIG":
+                    self._client.config_get("maxmemory")
+                    accessible.append(cmd)
+                elif cmd == "DEBUG":
+                    # DEBUG SLEEP 0 is harmless
+                    self._client.execute_command("DEBUG", "SLEEP", "0")
+                    accessible.append(cmd)
+            except Exception as e:
+                if "unknown command" in str(e).lower() or "renamed" in str(e).lower():
+                    pass  # renamed/disabled
+                elif "no auth" in str(e).lower():
+                    pass
+                # Permission denied still means command exists
+                else:
+                    accessible.append(cmd)
+        if accessible:
+            self.out.add_finding(
+                title="Redis: Dangerous Commands Not Renamed or Disabled",
+                risk="HIGH", phase="config", catalogue_id="DB-352",
+                description=f"Dangerous commands accessible: {accessible}",
+                output=f"Accessible: {accessible}",
+                command="redis-cli CONFIG GET ... / DEBUG SLEEP 0",
+                db_version=self._version
+            )
+
+    def check_bind(self):
+        try:
+            bind = self._client.config_get("bind")
+            addr = bind.get("bind", "127.0.0.1")
+            if "0.0.0.0" in addr or addr.strip() == "":
+                self.out.add_finding(
+                    title="Database Listening on All Network Interfaces (0.0.0.0)",
+                    risk="HIGH", phase="config", catalogue_id="DB-004",
+                    description=f"Redis bind={addr!r}",
+                    output=f"bind = {addr}",
+                    command="redis-cli CONFIG GET bind",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_tls(self):
+        try:
+            tls_port = self._client.config_get("tls-port")
+            if not tls_port.get("tls-port") or tls_port.get("tls-port") == "0":
+                self.out.add_finding(
+                    title="Cleartext Database Protocol (No TLS/SSL)",
+                    risk="HIGH", phase="network", catalogue_id="DB-001",
+                    description="Redis TLS is not configured (tls-port=0).",
+                    output=f"tls-port = {tls_port.get('tls-port', '0')}",
+                    command="redis-cli CONFIG GET tls-port",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_acl(self):
+        """Redis 6+ ACL check."""
+        try:
+            acl_list = self._client.execute_command("ACL", "LIST")
+            default_full = False
+            for entry in acl_list:
+                if "user default" in str(entry) and "+@all" in str(entry) and "nopass" in str(entry):
+                    default_full = True
+            if default_full:
+                self.out.add_finding(
+                    title="Redis: Default ACL User Has Full Access (nopass +@all)",
+                    risk="CRITICAL", phase="auth",
+                    description="The default Redis ACL user has no password and full command access.",
+                    output=str(acl_list)[:300],
+                    command="redis-cli ACL LIST",
+                    owasp="A07:2021", owasp_asvs="V2.1.1", nist="IA-2",
+                    pci_dss="8.2.1", hipaa="164.312(d)",
+                    db_version=self._version
+                )
+        except Exception:
+            pass
+
+    def check_default_creds(self):
+        redis = _try_import("redis")
+        if not redis:
+            return
+        for _, pwd in _DEFAULT_CREDS["redis"]:
+            if pwd == self.password:
+                continue
+            try:
+                r2 = redis.Redis(host=self.host, port=self.port, password=pwd or None,
+                                 socket_timeout=4, decode_responses=True)
+                r2.ping()
+                self.out.add_finding(
+                    title="Default Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Authenticated with default password: {'(empty)' if not pwd else '***'}",
+                    output=f"password={'(empty)' if not pwd else '***'}",
+                    command=f"redis-cli -h {self.host} -p {self.port} -a ***",
+                    db_version=self._version
+                )
+                break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_no_auth, "auth"),
+            (self.check_default_creds, "auth"),
+            (self.check_protected_mode, "config"),
+            (self.check_dangerous_commands, "config"),
+            (self.check_bind, "config"),
+            (self.check_tls, "network"),
+            (self.check_acl, "auth"),
+        ]:
+            _console.status("redis", label=f"Redis {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# Cassandra Auditor
+# ---------------------------------------------------------------------------
+class CassandraAuditor:
+    def __init__(self, host, port, username, password, keyspace, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.keyspace = keyspace
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._session = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        cassandra = _try_import("cassandra", "cassandra-driver")
+        if not cassandra:
+            return False
+        try:
+            from cassandra.cluster import Cluster
+            from cassandra.auth import PlainTextAuthProvider
+            auth = PlainTextAuthProvider(username=self.username, password=self.password) \
+                   if self.username else None
+            ssl_ctx = ssl.create_default_context() if self.ssl_en else None
+            cluster = Cluster(
+                [self.host], port=self.port, auth_provider=auth,
+                ssl_context=ssl_ctx, connect_timeout=self.timeout
+            )
+            self._session = cluster.connect(self.keyspace or None)
+            return True
+        except Exception as e:
+            _console.log(f"Cassandra connect failed: {e}", "ERROR")
+            return False
+
+    def _q(self, cql: str) -> list:
+        try:
+            return list(self._session.execute(cql))
+        except Exception as e:
+            self.out.log_error("cassandra-query", str(e))
+            return []
+
+    def check_version(self) -> str:
+        rows = self._q("SELECT release_version FROM system.local")
+        ver = rows[0].release_version if rows else ""
+        self._version = ver
+        self.out.log_step(f"Cassandra version: {ver}")
+        major_minor = ".".join(ver.split(".")[:2])
+        if _EOL_VERSIONS.get("cassandra", {}).get(major_minor, False):
+            self.out.add_finding(
+                title=f"End-of-Life Cassandra Version: {ver}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"Cassandra {ver} is end-of-life.",
+                output=f"release_version={ver}", db_version=ver
+            )
+        for cve in _KNOWN_CVES.get("cassandra", []):
+            if any(ver.startswith(v) for v in cve["versions"]):
+                self.out.add_finding(
+                    title=f"Known CVE in Cassandra Version: {cve['cve']}",
+                    risk="HIGH", phase="version", catalogue_id="DB-010",
+                    description=cve["desc"], cves=cve["cve"],
+                    output=f"Version: {ver}", db_version=ver
+                )
+        return ver
+
+    def check_auth(self):
+        """Try AllowAll — if we connected without a username, auth is disabled."""
+        if not self.username:
+            self.out.add_finding(
+                title="Cassandra: AllowAllAuthenticator Configured (No Authentication)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-400",
+                description="Connected without credentials — authentication is disabled.",
+                output=f"Connected to {self.host}:{self.port} without credentials",
+                command=f"cqlsh {self.host} {self.port}",
+                db_version=self._version
+            )
+
+    def check_default_creds(self):
+        cassandra = _try_import("cassandra", "cassandra-driver")
+        if not cassandra:
+            return
+        from cassandra.cluster import Cluster
+        from cassandra.auth import PlainTextAuthProvider
+        for user, pwd in _DEFAULT_CREDS["cassandra"]:
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                ap = PlainTextAuthProvider(username=user, password=pwd)
+                cl = Cluster([self.host], port=self.port, auth_provider=ap,
+                             connect_timeout=4)
+                s = cl.connect()
+                s.shutdown()
+                cl.shutdown()
+                self.out.add_finding(
+                    title="Cassandra: Default cassandra/cassandra Credentials in Use",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-401",
+                    description=f"Authenticated with default credentials: {user}/{pwd}",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"cqlsh -u {user} -p *** {self.host} {self.port}"
+                )
+                break
+            except Exception:
+                pass
+
+    def check_tls(self):
+        rows = self._q(
+            "SELECT client_id FROM system_auth.roles LIMIT 1"
+        )
+        # Attempt a cleartext connection to probe TLS
+        try:
+            from cassandra.cluster import Cluster
+            cl = Cluster([self.host], port=self.port, connect_timeout=4)
+            s = cl.connect()
+            s.shutdown()
+            cl.shutdown()
+            self.out.add_finding(
+                title="Cassandra: Client-to-Server Encryption Disabled",
+                risk="HIGH", phase="network", catalogue_id="DB-402",
+                description="Cassandra accepted a cleartext (non-TLS) connection.",
+                output=f"Connected to {self.host}:{self.port} without TLS",
+                command=f"cqlsh {self.host} {self.port}",
+                db_version=self._version
+            )
+        except Exception:
+            pass
+
+    def check_superusers(self):
+        rows = self._q("SELECT role, super FROM system_auth.roles WHERE super=true")
+        users = [r.role for r in rows]
+        if "cassandra" in users:
+            self.out.add_finding(
+                title="Default Credentials in Use",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-401",
+                description="Default 'cassandra' superuser account is still active.",
+                output=f"superusers={users}", db_version=self._version
+            )
+        if len(users) > 2:
+            self.out.add_finding(
+                title="Cassandra: Multiple Superuser Accounts",
+                risk="MEDIUM", phase="accounts",
+                description=f"More than 2 superuser accounts found: {users}",
+                output=str(users),
+                command="SELECT role FROM system_auth.roles WHERE super=true",
+                owasp="A01:2021", nist="AC-6", pci_dss="7.2.1",
+                db_version=self._version
+            )
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_auth, "auth"),
+            (self.check_default_creds, "auth"),
+            (self.check_tls, "network"),
+            (self.check_superusers, "accounts"),
+        ]:
+            _console.status("cassandra", label=f"Cassandra {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# Elasticsearch Auditor  (HTTP-based)
+# ---------------------------------------------------------------------------
+class ElasticsearchAuditor:
+    def __init__(self, host, port, username, password, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._version = ""
+        self._base_url = f"{'https' if ssl_enabled else 'http'}://{host}:{port}"
+        self._auth     = (username, password) if username else None
+
+    def _get(self, path: str) -> dict:
+        try:
+            import urllib.request
+            import base64
+            url = self._base_url + path
+            req = urllib.request.Request(url)
+            if self._auth:
+                token = base64.b64encode(
+                    f"{self._auth[0]}:{self._auth[1]}".encode()
+                ).decode()
+                req.add_header("Authorization", f"Basic {token}")
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            resp = urllib.request.urlopen(req, timeout=self.timeout,
+                                          context=ctx if self.ssl_en else None)
+            return json.loads(resp.read())
+        except Exception as e:
+            return {"_error": str(e)}
+
+    def connect(self) -> bool:
+        result = self._get("/")
+        return "_error" not in result
+
+    def check_version(self) -> str:
+        data = self._get("/")
+        ver = data.get("version", {}).get("number", "")
+        self._version = ver
+        self.out.log_step(f"Elasticsearch version: {ver}")
+        major_minor = ".".join(ver.split(".")[:2])
+        if _EOL_VERSIONS.get("elasticsearch", {}).get(major_minor, False):
+            self.out.add_finding(
+                title=f"End-of-Life Elasticsearch Version: {ver}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"Elasticsearch {ver} is end-of-life.",
+                output=f"version={ver}", db_version=ver
+            )
+        for cve in _KNOWN_CVES.get("elasticsearch", []):
+            if any(ver.startswith(v) for v in cve["versions"]):
+                self.out.add_finding(
+                    title=f"Known CVE in Elasticsearch Version: {cve['cve']}",
+                    risk="HIGH", phase="version", catalogue_id="DB-010",
+                    description=cve["desc"], cves=cve["cve"],
+                    output=f"Version: {ver}", db_version=ver
+                )
+        return ver
+
+    def check_no_auth(self):
+        """Test unauthenticated access."""
+        result = self._get("/_cluster/health")
+        if "_error" not in result:
+            self.out.add_finding(
+                title="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-450",
+                description="Elasticsearch cluster health accessible without authentication.",
+                output=json.dumps(result)[:500],
+                command=f"curl -s http://{self.host}:{self.port}/_cluster/health",
+                db_version=self._version
+            )
+
+    def check_cluster_info_exposed(self):
+        data = self._get("/")
+        if "cluster_name" in data:
+            self.out.add_finding(
+                title="Elasticsearch: Unauthenticated Cluster Information Exposed",
+                risk="HIGH", phase="config", catalogue_id="DB-451",
+                description=f"Cluster info exposed: cluster_name={data.get('cluster_name')} version={data.get('version',{}).get('number')}",
+                output=json.dumps(data)[:500],
+                command=f"curl -s http://{self.host}:{self.port}/",
+                db_version=self._version
+            )
+
+    def check_indices(self):
+        result = self._get("/_cat/indices?format=json")
+        if isinstance(result, list) and result:
+            idx_names = [i.get("index", "") for i in result]
+            self.out.add_finding(
+                title="Elasticsearch: Index Enumeration Without Authentication",
+                risk="HIGH", phase="permissions",
+                description=f"All {len(idx_names)} indices are enumerable without auth.",
+                output=str(idx_names[:20]),
+                command=f"curl -s http://{self.host}:{self.port}/_cat/indices",
+                owasp="A01:2021", nist="AC-3", pci_dss="7.2.1",
+                hipaa="164.312(a)(1)", db_version=self._version
+            )
+
+    def check_security_settings(self):
+        result = self._get("/_cluster/settings?include_defaults=true&filter_path=**.security")
+        sec = result.get("defaults", {}).get("xpack", {}).get("security", {})
+        if sec.get("enabled") is False:
+            self.out.add_finding(
+                title="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-450",
+                description="xpack.security.enabled=false",
+                output=json.dumps(sec)[:300],
+                command=f"curl -s http://{self.host}:{self.port}/_cluster/settings",
+                db_version=self._version
+            )
+
+    def check_default_creds(self):
+        for user, pwd in _DEFAULT_CREDS["elasticsearch"]:
+            if user == self.username and pwd == self.password:
+                continue
+            import urllib.request
+            import base64
+            try:
+                url = self._base_url + "/"
+                req = urllib.request.Request(url)
+                token = base64.b64encode(f"{user}:{pwd}".encode()).decode()
+                req.add_header("Authorization", f"Basic {token}")
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                resp = urllib.request.urlopen(req, timeout=4,
+                                             context=ctx if self.ssl_en else None)
+                if resp.status == 200:
+                    self.out.add_finding(
+                        title="Default Credentials in Use",
+                        risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                        description=f"Authenticated with default credentials: {user}/{pwd}",
+                        output=f"user={user}", db_version=self._version,
+                        command=f"curl -u {user}:*** http://{self.host}:{self.port}/"
+                    )
+                    break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_no_auth, "auth"),
+            (self.check_default_creds, "auth"),
+            (self.check_cluster_info_exposed, "config"),
+            (self.check_indices, "permissions"),
+            (self.check_security_settings, "config"),
+        ]:
+            _console.status("elasticsearch", label=f"ES {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# Oracle Auditor  (oracledb thin mode — no Instant Client required)
+# ---------------------------------------------------------------------------
+class OracleAuditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 ssl_enabled=False, timeout=15):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database or "ORCL"
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._conn    = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        oracledb = _try_import("oracledb")
+        if not oracledb:
+            return False
+        try:
+            oracledb.init_oracle_client = lambda *a, **k: None  # stay in thin mode
+            dsn = f"{self.host}:{self.port}/{self.database}"
+            self._conn = oracledb.connect(
+                user=self.username, password=self.password, dsn=dsn
+            )
+            return True
+        except Exception as e:
+            _console.log(f"Oracle connect failed: {e}", "ERROR")
+            return False
+
+    def _q(self, sql: str) -> list:
+        try:
+            cur = self._conn.cursor()
+            cur.execute(sql)
+            return cur.fetchall()
+        except Exception as e:
+            self.out.log_error("oracle-query", str(e))
+            return []
+
+    def _q1(self, sql: str):
+        rows = self._q(sql)
+        return rows[0] if rows else None
+
+    def check_version(self) -> str:
+        row = self._q1("SELECT BANNER FROM V$VERSION WHERE ROWNUM=1")
+        ver = row[0] if row else ""
+        self._version = ver
+        self.out.log_step(f"Oracle version: {ver}")
+        if "11g" in ver.lower() or "10g" in ver.lower():
+            self.out.add_finding(
+                title=f"End-of-Life Oracle Database Version: {ver}",
+                risk="CRITICAL", phase="version", catalogue_id="DB-009",
+                description=f"Oracle {ver} is end-of-life and no longer receives security patches.",
+                output=ver, db_version=ver,
+                command="SELECT BANNER FROM V$VERSION"
+            )
+        return ver
+
+    def check_default_passwords(self):
+        rows = self._q(
+            "SELECT USERNAME,ACCOUNT_STATUS FROM DBA_USERS "
+            "WHERE ACCOUNT_STATUS NOT IN ('LOCKED','EXPIRED & LOCKED') "
+            "AND USERNAME IN ('SCOTT','HR','OE','SH','PM','BI','OUTLN','MDSYS',"
+            "'DBSNMP','SYSMAN','ANONYMOUS','APEX_PUBLIC_USER')"
+        )
+        if rows:
+            users = [r[0] for r in rows]
+            self.out.add_finding(
+                title="Oracle Default Sample Schema Accounts Active",
+                risk="HIGH", phase="auth", catalogue_id="DB-006",
+                description=f"Default Oracle schema accounts are active: {users}",
+                output=str(users), db_version=self._version,
+                command="SELECT USERNAME,ACCOUNT_STATUS FROM DBA_USERS"
+            )
+
+    def check_public_grants(self):
+        dangerous = ("UTL_FILE","UTL_HTTP","UTL_TCP","UTL_SMTP","DBMS_SQL",
+                     "DBMS_SCHEDULER","DBMS_JAVA","JAVA_ADMIN","JAVA_DEPLOY")
+        rows = self._q(
+            "SELECT GRANTEE,PRIVILEGE,TABLE_NAME FROM DBA_TAB_PRIVS "
+            "WHERE GRANTEE='PUBLIC' AND OWNER='SYS' "
+            f"AND TABLE_NAME IN ({','.join(repr(p) for p in dangerous)})"
+        )
+        if rows:
+            grants = [f"{r[2]} {r[1]}" for r in rows]
+            self.out.add_finding(
+                title="Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
+                risk="HIGH", phase="permissions", catalogue_id="DB-053",
+                description=f"PUBLIC execute grants on privileged packages: {grants}",
+                output=str(grants), db_version=self._version,
+                command="SELECT GRANTEE,PRIVILEGE,TABLE_NAME FROM DBA_TAB_PRIVS WHERE GRANTEE='PUBLIC'"
+            )
+
+    def check_remote_os_authent(self):
+        row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='remote_os_authent'")
+        if row and str(row[0]).upper() == "TRUE":
+            self.out.add_finding(
+                title="Oracle REMOTE_OS_AUTHENT Enabled",
+                risk="CRITICAL", phase="config", catalogue_id="DB-051",
+                description="REMOTE_OS_AUTHENT=TRUE allows OS-level authentication bypass.",
+                output="remote_os_authent=TRUE", db_version=self._version,
+                command="SELECT VALUE FROM V$PARAMETER WHERE NAME='remote_os_authent'"
+            )
+
+    def check_utl_file_dir(self):
+        row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='utl_file_dir'")
+        if row and str(row[0]).strip() in ("*", "/"):
+            self.out.add_finding(
+                title="Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
+                risk="HIGH", phase="config", catalogue_id="DB-052",
+                description=f"UTL_FILE_DIR={row[0]} permits read/write of any OS file.",
+                output=f"utl_file_dir={row[0]}", db_version=self._version,
+                command="SELECT VALUE FROM V$PARAMETER WHERE NAME='utl_file_dir'"
+            )
+
+    def check_audit_trail(self):
+        row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='audit_trail'")
+        val = str(row[0]).upper() if row else "NONE"
+        if val in ("NONE", "FALSE"):
+            self.out.add_finding(
+                title="Oracle Unified Auditing Disabled",
+                risk="MEDIUM", phase="config", catalogue_id="DB-054",
+                description="AUDIT_TRAIL=NONE — no audit records are generated.",
+                output=f"audit_trail={val}", db_version=self._version,
+                command="SELECT VALUE FROM V$PARAMETER WHERE NAME='audit_trail'"
+            )
+
+    def check_excessive_privs(self):
+        rows = self._q(
+            "SELECT GRANTEE,PRIVILEGE FROM DBA_SYS_PRIVS "
+            "WHERE PRIVILEGE IN ('DBA','SYSDBA','SYSOPER','CREATE ANY TABLE',"
+            "'DROP ANY TABLE','ALTER ANY TABLE','SELECT ANY TABLE',"
+            "'EXECUTE ANY PROCEDURE','CREATE ANY PROCEDURE') "
+            "AND GRANTEE NOT IN ('SYS','SYSTEM','DBA','IMP_FULL_DATABASE','EXP_FULL_DATABASE')"
+        )
+        if rows:
+            privs = [f"{r[0]}:{r[1]}" for r in rows[:20]]
+            self.out.add_finding(
+                title="Excessive Oracle System Privileges Granted to Non-SYS Accounts",
+                risk="HIGH", phase="permissions", catalogue_id="DB-055",
+                description=f"High-privilege grants: {privs}",
+                output=str(privs), db_version=self._version,
+                command="SELECT GRANTEE,PRIVILEGE FROM DBA_SYS_PRIVS WHERE ..."
+            )
+
+    def check_legacy_hashes(self):
+        rows = self._q(
+            "SELECT USERNAME FROM DBA_USERS "
+            "WHERE PASSWORD_VERSIONS LIKE '%10G%' "
+            "AND ACCOUNT_STATUS='OPEN'"
+        )
+        if rows:
+            users = [r[0] for r in rows]
+            self.out.add_finding(
+                title="Oracle Accounts Using Weak 10g DES Password Hash",
+                risk="HIGH", phase="auth", catalogue_id="DB-056",
+                description=f"Accounts still using MD5/DES 10g hash: {users}",
+                output=str(users), db_version=self._version,
+                command="SELECT USERNAME FROM DBA_USERS WHERE PASSWORD_VERSIONS LIKE '%10G%'"
+            )
+
+    def check_ols(self):
+        rows = self._q(
+            "SELECT STATUS FROM V$OPTION WHERE PARAMETER='Oracle Label Security'"
+        )
+        if rows and str(rows[0][0]).upper() != "TRUE":
+            self.out.add_finding(
+                title="Oracle Label Security (OLS) Not Enabled",
+                risk="LOW", phase="config", catalogue_id="DB-057",
+                description="Oracle Label Security is not active — row-level access control unavailable.",
+                output="OLS_STATUS=FALSE", db_version=self._version,
+                command="SELECT STATUS FROM V$OPTION WHERE PARAMETER='Oracle Label Security'",
+                validation_required=True,
+                validation_notes="OLS may be intentionally omitted; verify with DBA."
+            )
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_default_passwords, "auth"),
+            (self.check_public_grants, "permissions"),
+            (self.check_remote_os_authent, "config"),
+            (self.check_utl_file_dir, "config"),
+            (self.check_audit_trail, "config"),
+            (self.check_excessive_privs, "permissions"),
+            (self.check_legacy_hashes, "auth"),
+            (self.check_ols, "config"),
+        ]:
+            _console.status("oracle", label=f"Oracle {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# CouchDB Auditor  (HTTP-based)
+# ---------------------------------------------------------------------------
+class CouchDBAuditor:
+    def __init__(self, host, port, username, password, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._version = ""
+        scheme = "https" if ssl_enabled else "http"
+        self._base    = f"{scheme}://{host}:{port}"
+
+    def _get(self, path: str, auth=None) -> tuple:
+        """Returns (status_code, body_dict)."""
+        import urllib.request, urllib.error, base64
+        url = self._base + path
+        req = urllib.request.Request(url)
+        if auth:
+            tok = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+            req.add_header("Authorization", f"Basic {tok}")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None
+            )
+            return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._get("/")
+        if code == 200 and "couchdb" in body:
+            self._version = body.get("version", "")
+            return True
+        return False
+
+    def check_version(self):
+        self.out.log_step(f"CouchDB version: {self._version}")
+
+    def check_admin_party(self):
+        """Admin party = no admins configured, any user is admin."""
+        code, body = self._get("/_config/admins")
+        if code == 200 and isinstance(body, dict) and len(body) == 0:
+            self.out.add_finding(
+                title="CouchDB Admin Party Mode — No Admin Accounts Configured",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-400",
+                description="CouchDB has no admin accounts; any request has full admin access.",
+                output="/_config/admins returned empty object",
+                db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/_config/admins"
+            )
+
+    def check_no_auth(self):
+        code, body = self._get("/_all_dbs")
+        if code == 200 and isinstance(body, list):
+            self.out.add_finding(
+                title="CouchDB: Unauthenticated Access to /_all_dbs",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-450",
+                description=f"All databases readable without credentials: {body[:10]}",
+                output=str(body[:10]), db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/_all_dbs"
+            )
+
+    def check_cluster_config_exposed(self):
+        code, body = self._get("/_node/_local/_config")
+        if code == 200:
+            self.out.add_finding(
+                title="CouchDB Node Configuration Exposed Without Authentication",
+                risk="HIGH", phase="config", catalogue_id="DB-401",
+                description="/_node/_local/_config accessible without auth — reveals bind addresses, ports, secret keys.",
+                output=str(body)[:500], db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/_node/_local/_config"
+            )
+
+    def check_default_creds(self):
+        for user, pwd in _DEFAULT_CREDS.get("couchdb", []):
+            code, body = self._get("/_session", auth=(user, pwd))
+            if code == 200 and body.get("ok"):
+                self.out.add_finding(
+                    title=f"CouchDB Default Credentials: {user}/{pwd}",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Authenticated with default credentials {user}/{pwd}.",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"curl -u {user}:*** http://{self.host}:{self.port}/_session"
+                )
+                break
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_admin_party, "auth"),
+            (self.check_no_auth, "auth"),
+            (self.check_cluster_config_exposed, "config"),
+            (self.check_default_creds, "auth"),
+        ]:
+            _console.status("couchdb", label=f"CouchDB {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# InfluxDB Auditor  (HTTP v2 API)
+# ---------------------------------------------------------------------------
+class InfluxDBAuditor:
+    def __init__(self, host, port, username, password, out: AugerOutput,
+                 ssl_enabled=False, timeout=10, token=""):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self.token    = token
+        self._version = ""
+        scheme = "https" if ssl_enabled else "http"
+        self._base    = f"{scheme}://{host}:{port}"
+
+    def _get(self, path: str, token=None) -> tuple:
+        import urllib.request, urllib.error
+        url = self._base + path
+        req = urllib.request.Request(url)
+        if token:
+            req.add_header("Authorization", f"Token {token}")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None
+            )
+            return resp.getcode(), json.loads(resp.read())
+        except Exception as e:
+            try:
+                import urllib.error
+                if isinstance(e, urllib.error.HTTPError):
+                    return e.code, {}
+            except Exception:
+                pass
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._get("/health")
+        return code == 200 and body.get("status") == "pass"
+
+    def check_version(self):
+        code, body = self._get("/health")
+        self._version = body.get("version", "")
+        self.out.log_step(f"InfluxDB version: {self._version}")
+
+    def check_setup_incomplete(self):
+        code, body = self._get("/api/v2/setup")
+        if code == 200 and not body.get("allowed", True):
+            self.out.add_finding(
+                title="InfluxDB 2.x Initial Setup Not Completed",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-420",
+                description="InfluxDB setup endpoint indicates initial admin setup has not been completed.",
+                output=str(body)[:300], db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/api/v2/setup"
+            )
+
+    def check_no_auth(self):
+        code, body = self._get("/api/v2/authorizations")
+        if code == 200:
+            self.out.add_finding(
+                title="InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-450",
+                description="Token authorizations accessible without authentication.",
+                output=str(body)[:300], db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/api/v2/authorizations"
+            )
+
+    def check_buckets_exposed(self):
+        code, body = self._get("/api/v2/buckets")
+        if code == 200 and "buckets" in body:
+            buckets = [b.get("name", "") for b in body.get("buckets", [])]
+            self.out.add_finding(
+                title="InfluxDB 2.x Buckets Exposed Without Authentication",
+                risk="HIGH", phase="permissions", catalogue_id="DB-421",
+                description=f"Bucket listing accessible without token: {buckets[:10]}",
+                output=str(buckets[:10]), db_version=self._version,
+                command=f"curl http://{self.host}:{self.port}/api/v2/buckets"
+            )
+
+    def check_default_creds(self):
+        for user, pwd in _DEFAULT_CREDS.get("influxdb", []):
+            import base64
+            import urllib.request, urllib.error
+            url = self._base + "/api/v2/signin"
+            req = urllib.request.Request(url, method="POST")
+            tok = base64.b64encode(f"{user}:{pwd}".encode()).decode()
+            req.add_header("Authorization", f"Basic {tok}")
+            try:
+                resp = urllib.request.urlopen(req, timeout=self.timeout)
+                if resp.getcode() in (200, 204):
+                    self.out.add_finding(
+                        title=f"InfluxDB Default Credentials: {user}/{pwd}",
+                        risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                        description=f"Authenticated with default credentials {user}/{pwd}.",
+                        output=f"user={user}", db_version=self._version,
+                        command=f"curl -u {user}:*** -X POST {self._base}/api/v2/signin"
+                    )
+                    break
+            except Exception:
+                pass
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_setup_incomplete, "auth"),
+            (self.check_no_auth, "auth"),
+            (self.check_buckets_exposed, "permissions"),
+            (self.check_default_creds, "auth"),
+        ]:
+            _console.status("influxdb", label=f"InfluxDB {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+
+# ---------------------------------------------------------------------------
+# Neo4j Auditor  (Bolt protocol via neo4j driver)
+# ---------------------------------------------------------------------------
+class Neo4jAuditor:
+    def __init__(self, host, port, username, password, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._driver  = None
+        self._version = ""
+
+    def connect(self) -> bool:
+        neo4j = _try_import("neo4j")
+        if not neo4j:
+            return False
+        try:
+            from neo4j import GraphDatabase
+            scheme = "bolt+s" if self.ssl_en else "bolt"
+            uri = f"{scheme}://{self.host}:{self.port}"
+            self._driver = GraphDatabase.driver(
+                uri, auth=(self.username, self.password),
+                connection_timeout=self.timeout,
+                max_connection_lifetime=30
+            )
+            with self._driver.session() as sess:
+                sess.run("RETURN 1")
+            return True
+        except Exception as e:
+            _console.log(f"Neo4j connect failed: {e}", "ERROR")
+            return False
+
+    def _run(self, cypher: str) -> list:
+        try:
+            with self._driver.session() as sess:
+                result = sess.run(cypher)
+                return list(result)
+        except Exception as e:
+            self.out.log_error("neo4j-query", str(e))
+            return []
+
+    def check_version(self):
+        rows = self._run("CALL dbms.components() YIELD name, versions, edition")
+        for row in rows:
+            ver = row["versions"][0] if row["versions"] else ""
+            self._version = ver
+            self.out.log_step(f"Neo4j version: {ver} edition: {row['edition']}")
+
+    def check_config_exposed(self):
+        sensitive_keys = {
+            "dbms.security.auth_enabled": ("FALSE", "CRITICAL", "DB-430", "Neo4j authentication disabled."),
+            "dbms.connector.bolt.enabled": ("TRUE", None, None, None),
+        }
+        rows = self._run("CALL dbms.listConfig() YIELD name, value")
+        config = {row["name"]: row["value"] for row in rows}
+        auth_val = str(config.get("dbms.security.auth_enabled", "true")).lower()
+        if auth_val in ("false", "0", "no"):
+            self.out.add_finding(
+                title="Neo4j Authentication Disabled (dbms.security.auth_enabled=false)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-430",
+                description="dbms.security.auth_enabled=false — all connections are unauthenticated.",
+                output=f"auth_enabled={auth_val}", db_version=self._version,
+                command="CALL dbms.listConfig() YIELD name,value WHERE name CONTAINS 'auth'"
+            )
+        # Check if cluster info is exposed externally
+        if config.get("dbms.mode", "").upper() in ("CORE", "READ_REPLICA", "ARBITER"):
+            self.out.add_finding(
+                title="Neo4j Cluster Mode Detected — Verify Firewall Isolation",
+                risk="MEDIUM", phase="config", catalogue_id="DB-431",
+                description=f"Neo4j running in cluster mode ({config.get('dbms.mode')}); cluster discovery ports may be exposed.",
+                output=f"mode={config.get('dbms.mode')}", db_version=self._version,
+                validation_required=True,
+                validation_notes="Confirm cluster ports 5000/6000/7000 are firewalled."
+            )
+
+    def check_default_creds(self):
+        neo4j = _try_import("neo4j")
+        if not neo4j:
+            return
+        from neo4j import GraphDatabase
+        scheme = "bolt+s" if self.ssl_en else "bolt"
+        uri = f"{scheme}://{self.host}:{self.port}"
+        for user, pwd in _DEFAULT_CREDS.get("neo4j", []):
+            if user == self.username and pwd == self.password:
+                continue
+            try:
+                d = GraphDatabase.driver(uri, auth=(user, pwd),
+                                         connection_timeout=5, max_connection_lifetime=10)
+                with d.session() as sess:
+                    sess.run("RETURN 1")
+                d.close()
+                self.out.add_finding(
+                    title=f"Neo4j Default Credentials: {user}/{pwd}",
+                    risk="CRITICAL", phase="auth", catalogue_id="DB-006",
+                    description=f"Neo4j accepted default credentials {user}/{pwd}.",
+                    output=f"user={user}", db_version=self._version,
+                    command=f"cypher-shell -a {uri} -u {user} -p *** 'RETURN 1'"
+                )
+                break
+            except Exception:
+                pass
+
+    def check_procedures(self):
+        dangerous = {"apoc.cypher.runFile", "apoc.cypher.run",
+                     "dbms.security.createUser", "dbms.security.deleteUser"}
+        rows = self._run("CALL dbms.procedures() YIELD name, rolesExecution")
+        for row in rows:
+            name = row.get("name", "")
+            roles = row.get("rolesExecution") or []
+            if name in dangerous and (not roles or "PUBLIC" in roles):
+                self.out.add_finding(
+                    title=f"Neo4j Dangerous Procedure Publicly Accessible: {name}",
+                    risk="HIGH", phase="permissions", catalogue_id="DB-432",
+                    description=f"Procedure '{name}' callable by PUBLIC role — may allow code execution or privilege escalation.",
+                    output=f"procedure={name} roles={roles}", db_version=self._version,
+                    command="CALL dbms.procedures() YIELD name, rolesExecution"
+                )
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_config_exposed, "config"),
+            (self.check_default_creds, "auth"),
+            (self.check_procedures, "permissions"),
+        ]:
+            _console.status("neo4j", label=f"Neo4j {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+    def close(self):
+        if self._driver:
+            try:
+                self._driver.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Memcached Auditor  (raw TCP text protocol)
+# ---------------------------------------------------------------------------
+class MemcachedAuditor:
+    def __init__(self, host, port, out: AugerOutput, timeout=10):
+        self.host    = host
+        self.port    = port
+        self.out     = out
+        self.timeout = timeout
+        self._sock   = None
+        self._version = ""
+
+    def _send(self, cmd: str) -> str:
+        try:
+            self._sock.sendall((cmd + "\r\n").encode())
+            data = b""
+            self._sock.settimeout(3.0)
+            while True:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"END\r\n" in data or b"ERROR\r\n" in data or b"\r\n" in data:
+                    break
+            return data.decode(errors="replace")
+        except Exception:
+            return ""
+
+    def connect(self) -> bool:
+        try:
+            self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            resp = self._send("version")
+            if resp.startswith("VERSION"):
+                self._version = resp.split()[-1].strip()
+                return True
+            return False
+        except Exception as e:
+            _console.log(f"Memcached connect failed: {e}", "ERROR")
+            return False
+
+    def check_version(self):
+        self.out.log_step(f"Memcached version: {self._version}")
+
+    def check_no_sasl_auth(self):
+        resp = self._send("stats settings")
+        if "auth_enabled_sasl" in resp:
+            for line in resp.splitlines():
+                if "auth_enabled_sasl" in line:
+                    val = line.split()[-1].strip().lower()
+                    if val in ("no", "false", "0"):
+                        self.out.add_finding(
+                            title="Memcached: SASL Authentication Disabled",
+                            risk="CRITICAL", phase="auth", catalogue_id="DB-440",
+                            description="Memcached has no authentication; any client can read/write all cached data.",
+                            output=line, db_version=self._version,
+                            command=f"echo 'stats settings' | nc {self.host} {self.port}"
+                        )
+        else:
+            self.out.add_finding(
+                title="Memcached: No Authentication (SASL Not Supported)",
+                risk="CRITICAL", phase="auth", catalogue_id="DB-440",
+                description="Memcached instance accessible without any authentication.",
+                output=resp[:200], db_version=self._version,
+                command=f"echo 'stats' | nc {self.host} {self.port}"
+            )
+
+    def check_stats_exposure(self):
+        resp = self._send("stats")
+        if resp.startswith("STAT"):
+            sensitive_keys = []
+            for line in resp.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] in ("pid", "uptime", "rusage_user",
+                                                      "total_connections", "curr_items", "bytes"):
+                    sensitive_keys.append(line.strip())
+            if sensitive_keys:
+                self.out.add_finding(
+                    title="Memcached: Runtime Statistics Accessible Without Authentication",
+                    risk="HIGH", phase="config", catalogue_id="DB-441",
+                    description="STATS command reveals process ID, memory usage, connection counts.",
+                    output="\n".join(sensitive_keys[:10]), db_version=self._version,
+                    command=f"echo 'stats' | nc {self.host} {self.port}"
+                )
+
+    def check_data_access(self):
+        resp = self._send("stats slabs")
+        slab_ids = []
+        for line in resp.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "STAT":
+                try:
+                    slab_id = int(parts[1].split(":")[0])
+                    if slab_id not in slab_ids:
+                        slab_ids.append(slab_id)
+                except ValueError:
+                    pass
+        if slab_ids:
+            sample_resp = self._send(f"stats cachedump {slab_ids[0]} 3")
+            if "ITEM" in sample_resp:
+                key_names = [ln.split()[1] for ln in sample_resp.splitlines()
+                             if ln.startswith("ITEM")]
+                self.out.add_finding(
+                    title="Memcached: Cached Data Keys Enumerable Without Authentication",
+                    risk="HIGH", phase="data", catalogue_id="DB-442",
+                    description=f"Sample cached keys: {key_names[:5]}",
+                    output=sample_resp[:400], db_version=self._version,
+                    validation_required=True,
+                    validation_notes="Review key names for PII/session tokens/API keys.",
+                    command=f"echo 'stats cachedump {slab_ids[0]} 3' | nc {self.host} {self.port}"
+                )
+
+    def run(self, db_version: str) -> list:
+        phases = []
+        for method, phase in [
+            (self.check_version, "version"),
+            (self.check_no_sasl_auth, "auth"),
+            (self.check_stats_exposure, "config"),
+            (self.check_data_access, "data"),
+        ]:
+            _console.status("memcached", label=f"Memcached {phase}", step=method.__name__,
+                            status="running")
+            try:
+                method()
+            except Exception as e:
+                self.out.log_error(method.__name__, str(e))
+            if phase not in phases:
+                phases.append(phase)
+        return phases
+
+    def close(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Generic network / TLS phase (all database types)
+# ---------------------------------------------------------------------------
+def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
+    _console.status("network", label="Network / TLS", step="tls_probe", status="running")
+    tls = _tls_info(host, port)
+    if not tls["tls_ok"]:
+        pass  # DB-specific auditors report no-TLS from config checks
+    else:
+        if tls.get("weak_version"):
+            out.add_finding(
+                title="Weak TLS Version (TLS 1.0 or TLS 1.1)",
+                risk="MEDIUM", phase="network", catalogue_id="DB-002",
+                description=f"Database negotiated {tls['version']} which is deprecated.",
+                output=f"TLS version={tls['version']} cipher={tls['cipher']}",
+                command=f"openssl s_client -connect {host}:{port}"
+            )
+        if tls.get("weak_cipher"):
+            out.add_finding(
+                title="Weak Cipher Suites Accepted",
+                risk="MEDIUM", phase="network", catalogue_id="DB-017",
+                description=f"Weak cipher suite negotiated: {tls['cipher']}",
+                output=f"cipher={tls['cipher']} version={tls['version']}",
+                command=f"nmap --script ssl-enum-ciphers -p {port} {host}"
+            )
+        if tls.get("self_signed"):
+            out.add_finding(
+                title="Self-Signed or Expired TLS Certificate",
+                risk="MEDIUM", phase="network", catalogue_id="DB-003",
+                description=f"Self-signed certificate: subject={tls['cert_subject']} issuer={tls['cert_issuer']}",
+                output=f"subject={tls['cert_subject']} issuer={tls['cert_issuer']}",
+                command=f"openssl s_client -connect {host}:{port} | openssl x509 -noout -text"
+            )
+        if tls.get("cert_expired"):
+            out.add_finding(
+                title="Expired TLS Certificate",
+                risk="MEDIUM", phase="network", catalogue_id="DB-003",
+                description="The database TLS certificate has expired.",
+                output=f"cert_subject={tls['cert_subject']}",
+                command=f"openssl s_client -connect {host}:{port} | openssl x509 -noout -dates"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Sensitive data column scan  (universal)
+# ---------------------------------------------------------------------------
+_SENSITIVE_PATTERNS = re.compile(
+    r'(ssn|social.?security|credit.?card|card.?number|cvv|ccv|cvc|pan|'
+    r'password|passwd|pwd|secret|token|api.?key|auth.?key|private.?key|'
+    r'dob|date.?of.?birth|birth.?date|phone|email|address|'
+    r'health|diagnosis|medical|patient|prescription|'
+    r'salary|income|bank.?account|routing.?number|iban|swift)',
+    re.IGNORECASE
+)
+
+def scan_sensitive_columns_mysql(conn, out: AugerOutput, db_version: str) -> None:
+    try:
+        import pymysql
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_schema, table_name, column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') "
+                "ORDER BY table_schema, table_name, column_name"
+            )
+            rows = cur.fetchall()
+        hits = [(r[0], r[1], r[2], r[3]) for r in rows
+                if _SENSITIVE_PATTERNS.search(r[2])]
+        if hits:
+            summary = [f"{r[0]}.{r[1]}.{r[2]}" for r in hits[:20]]
+            out.add_finding(
+                title="Sensitive Data Columns Identified (Potential PII/PHI/PCI Scope)",
+                risk="INFO", phase="data", catalogue_id="DB-015",
+                description=f"Columns with sensitive-pattern names found: {summary}",
+                output="\n".join(summary[:20]),
+                command="SELECT table_schema,table_name,column_name FROM information_schema.columns",
+                db_version=db_version
+            )
+    except Exception as e:
+        out.log_error("sensitive_columns_mysql", str(e))
+
+
+def scan_sensitive_columns_pg(conn, out: AugerOutput, db_version: str) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_schema, table_name, column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
+                "ORDER BY table_schema, table_name, column_name"
+            )
+            rows = cur.fetchall()
+        hits = [r for r in rows if _SENSITIVE_PATTERNS.search(r[2])]
+        if hits:
+            summary = [f"{r[0]}.{r[1]}.{r[2]}" for r in hits[:20]]
+            out.add_finding(
+                title="Sensitive Data Columns Identified (Potential PII/PHI/PCI Scope)",
+                risk="INFO", phase="data", catalogue_id="DB-015",
+                description=f"Columns with sensitive-pattern names: {summary}",
+                output="\n".join(summary[:20]),
+                command="SELECT table_schema,table_name,column_name FROM information_schema.columns",
+                db_version=db_version
+            )
+    except Exception as e:
+        out.log_error("sensitive_columns_pg", str(e))
+
+
+# ---------------------------------------------------------------------------
+# Schema enumeration helpers
+# ---------------------------------------------------------------------------
+_SENSITIVE_COL_RE = _SENSITIVE_PATTERNS  # alias used by schema enumerators
+
+
+def _col_sensitive(name: str) -> bool:
+    return bool(_SENSITIVE_COL_RE.search(name))
+
+
+def enumerate_schema_mysql(conn, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": out.db_type, "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        import pymysql
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_ROWS,COLUMN_NAME,DATA_TYPE,"
+                "IS_NULLABLE,COLUMN_KEY "
+                "FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA NOT IN ('mysql','information_schema',"
+                "'performance_schema','sys') "
+                "ORDER BY TABLE_SCHEMA,TABLE_NAME,ORDINAL_POSITION"
+            )
+            rows = cur.fetchall()
+        dbs: dict = {}
+        for (db, tbl, row_count, col, dtype, nullable, key) in rows:
+            dbs.setdefault(db, {})
+            dbs[db].setdefault(tbl, {"row_count": row_count or 0, "columns": []})
+            dbs[db][tbl]["columns"].append({
+                "name": col, "type": dtype,
+                "nullable": nullable == "YES", "key": key or "",
+                "sensitive": _col_sensitive(col)
+            })
+        for db_name, tables in dbs.items():
+            tbl_list = []
+            for tbl_name, tinfo in tables.items():
+                sens_cols = [c["name"] for c in tinfo["columns"] if c["sensitive"]]
+                tbl_list.append({
+                    "name": tbl_name,
+                    "row_count": tinfo["row_count"],
+                    "columns": tinfo["columns"],
+                    "sensitive": bool(sens_cols),
+                    "sensitive_columns": sens_cols,
+                })
+            schema["databases"].append({"name": db_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_mysql", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_pg(conn, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": out.db_type, "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_schema,table_name,column_name,data_type,"
+                "is_nullable,'' "
+                "FROM information_schema.columns "
+                "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
+                "ORDER BY table_schema,table_name,ordinal_position"
+            )
+            rows = cur.fetchall()
+        tables: dict = {}
+        for (sch, tbl, col, dtype, nullable, _) in rows:
+            key = f"{sch}.{tbl}"
+            tables.setdefault(key, {"schema": sch, "table": tbl, "columns": []})
+            tables[key]["columns"].append({
+                "name": col, "type": dtype,
+                "nullable": nullable == "YES", "key": "",
+                "sensitive": _col_sensitive(col)
+            })
+        db_entry: dict = {}
+        for key, tinfo in tables.items():
+            sch = tinfo["schema"]
+            db_entry.setdefault(sch, [])
+            sens_cols = [c["name"] for c in tinfo["columns"] if c["sensitive"]]
+            db_entry[sch].append({
+                "name": tinfo["table"],
+                "row_count": 0,
+                "columns": tinfo["columns"],
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        for sch_name, tbl_list in db_entry.items():
+            schema["databases"].append({"name": sch_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_pg", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_mssql(conn, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": out.db_type, "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT TABLE_CATALOG,TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,"
+            "DATA_TYPE,IS_NULLABLE "
+            "FROM INFORMATION_SCHEMA.COLUMNS "
+            "ORDER BY TABLE_CATALOG,TABLE_SCHEMA,TABLE_NAME,ORDINAL_POSITION"
+        )
+        rows = cur.fetchall()
+        tables: dict = {}
+        for (catalog, sch, tbl, col, dtype, nullable) in rows:
+            key = f"{catalog}.{sch}.{tbl}"
+            tables.setdefault(key, {"catalog": catalog, "schema": sch, "table": tbl, "columns": []})
+            tables[key]["columns"].append({
+                "name": col, "type": dtype,
+                "nullable": nullable == "YES", "key": "",
+                "sensitive": _col_sensitive(col)
+            })
+        db_map: dict = {}
+        for key, tinfo in tables.items():
+            db_key = f"{tinfo['catalog']}.{tinfo['schema']}"
+            db_map.setdefault(db_key, [])
+            sens_cols = [c["name"] for c in tinfo["columns"] if c["sensitive"]]
+            db_map[db_key].append({
+                "name": tinfo["table"],
+                "row_count": 0,
+                "columns": tinfo["columns"],
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        for db_name, tbl_list in db_map.items():
+            schema["databases"].append({"name": db_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_mssql", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_oracle(conn, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "oracle", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT OWNER,TABLE_NAME,COLUMN_NAME,DATA_TYPE,NULLABLE "
+            "FROM ALL_TAB_COLUMNS "
+            "WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','MDSYS','CTXSYS',"
+            "'EXFSYS','WMSYS','ORDSYS','ORDDATA','XDB') "
+            "ORDER BY OWNER,TABLE_NAME,COLUMN_ID"
+        )
+        rows = cur.fetchall()
+        tables: dict = {}
+        for (owner, tbl, col, dtype, nullable) in rows:
+            key = f"{owner}.{tbl}"
+            tables.setdefault(key, {"owner": owner, "table": tbl, "columns": []})
+            tables[key]["columns"].append({
+                "name": col, "type": dtype,
+                "nullable": nullable == "Y", "key": "",
+                "sensitive": _col_sensitive(col)
+            })
+        owners: dict = {}
+        for key, tinfo in tables.items():
+            owners.setdefault(tinfo["owner"], [])
+            sens_cols = [c["name"] for c in tinfo["columns"] if c["sensitive"]]
+            owners[tinfo["owner"]].append({
+                "name": tinfo["table"],
+                "row_count": 0,
+                "columns": tinfo["columns"],
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        for owner_name, tbl_list in owners.items():
+            schema["databases"].append({"name": owner_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_oracle", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_mongodb(client, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "mongodb", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        for db_name in client.list_database_names():
+            if db_name in ("admin", "local", "config"):
+                continue
+            db = client[db_name]
+            tbl_list = []
+            for coll_name in db.list_collection_names():
+                doc = db[coll_name].find_one({})
+                fields = []
+                if doc:
+                    for fname, fval in doc.items():
+                        fields.append({
+                            "name": fname,
+                            "type": type(fval).__name__,
+                            "nullable": True, "key": "_id" if fname == "_id" else "",
+                            "sensitive": _col_sensitive(fname)
+                        })
+                count = db[coll_name].estimated_document_count()
+                sens_cols = [f["name"] for f in fields if f["sensitive"]]
+                tbl_list.append({
+                    "name": coll_name,
+                    "row_count": count,
+                    "columns": fields,
+                    "sensitive": bool(sens_cols),
+                    "sensitive_columns": sens_cols,
+                })
+            schema["databases"].append({"name": db_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_mongodb", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_redis(client, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "redis", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        info = client.info("keyspace")
+        dbs_data = []
+        for db_name, db_info in info.items():
+            sample_keys = []
+            try:
+                cursor = 0
+                cursor, keys = client.scan(cursor, count=20)
+                sample_keys = [k.decode() if isinstance(k, bytes) else k for k in keys[:20]]
+            except Exception:
+                pass
+            sens_cols = [k for k in sample_keys if _col_sensitive(k)]
+            dbs_data.append({
+                "name": db_name,
+                "tables": [{
+                    "name": "keyspace_sample",
+                    "row_count": db_info.get("keys", 0),
+                    "columns": [{"name": k, "type": "key", "nullable": False,
+                                 "key": "", "sensitive": _col_sensitive(k)}
+                                for k in sample_keys],
+                    "sensitive": bool(sens_cols),
+                    "sensitive_columns": sens_cols,
+                }]
+            })
+        schema["databases"] = dbs_data
+    except Exception as e:
+        out.log_error("enumerate_schema_redis", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_cassandra(session, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "cassandra", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        rows = session.execute(
+            "SELECT keyspace_name,table_name,column_name,type "
+            "FROM system_schema.columns"
+        )
+        tables: dict = {}
+        for row in rows:
+            if row.keyspace_name in ("system", "system_schema", "system_auth", "system_distributed"):
+                continue
+            key = f"{row.keyspace_name}.{row.table_name}"
+            tables.setdefault(key, {"ks": row.keyspace_name, "table": row.table_name, "columns": []})
+            tables[key]["columns"].append({
+                "name": row.column_name, "type": row.type,
+                "nullable": True, "key": "",
+                "sensitive": _col_sensitive(row.column_name)
+            })
+        ks_map: dict = {}
+        for key, tinfo in tables.items():
+            ks_map.setdefault(tinfo["ks"], [])
+            sens_cols = [c["name"] for c in tinfo["columns"] if c["sensitive"]]
+            ks_map[tinfo["ks"]].append({
+                "name": tinfo["table"],
+                "row_count": 0,
+                "columns": tinfo["columns"],
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        for ks_name, tbl_list in ks_map.items():
+            schema["databases"].append({"name": ks_name, "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_cassandra", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_elasticsearch(auditor, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "elasticsearch", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        mapping = auditor._get("/_mapping")
+        if "_error" in mapping:
+            out.write_schema(schema)
+            return schema
+        tbl_list = []
+        for index_name, idx_data in mapping.items():
+            if index_name.startswith("."):
+                continue
+            props = idx_data.get("mappings", {}).get("properties", {})
+            columns = []
+            for field_name, field_info in props.items():
+                columns.append({
+                    "name": field_name,
+                    "type": field_info.get("type", "object"),
+                    "nullable": True, "key": "",
+                    "sensitive": _col_sensitive(field_name)
+                })
+            sens_cols = [c["name"] for c in columns if c["sensitive"]]
+            tbl_list.append({
+                "name": index_name,
+                "row_count": 0,
+                "columns": columns,
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        if tbl_list:
+            schema["databases"].append({"name": "indices", "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_elasticsearch", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_couchdb(auditor, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "couchdb", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        code, dbs = auditor._get("/_all_dbs")
+        if code != 200 or not isinstance(dbs, list):
+            out.write_schema(schema)
+            return schema
+        tbl_list = []
+        for db_name in dbs:
+            if db_name.startswith("_"):
+                continue
+            code2, info = auditor._get(f"/{db_name}/_all_docs?limit=1&include_docs=true")
+            columns = []
+            if code2 == 200:
+                rows_data = info.get("rows", [])
+                if rows_data:
+                    doc = rows_data[0].get("doc", {})
+                    for fname in doc.keys():
+                        if fname.startswith("_"):
+                            continue
+                        columns.append({
+                            "name": fname, "type": "field",
+                            "nullable": True, "key": "",
+                            "sensitive": _col_sensitive(fname)
+                        })
+            count = info.get("total_rows", 0) if code2 == 200 else 0
+            sens_cols = [c["name"] for c in columns if c["sensitive"]]
+            tbl_list.append({
+                "name": db_name,
+                "row_count": count,
+                "columns": columns,
+                "sensitive": bool(sens_cols),
+                "sensitive_columns": sens_cols,
+            })
+        schema["databases"].append({"name": "couchdb", "tables": tbl_list})
+    except Exception as e:
+        out.log_error("enumerate_schema_couchdb", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+def enumerate_schema_neo4j(driver, out: AugerOutput, db_version: str) -> dict:
+    schema = {"tool": "auger", "db_type": "neo4j", "db_version": db_version,
+              "host": out.host, "port": out.port,
+              "generated_at": out._ts(), "databases": []}
+    try:
+        with driver.session() as sess:
+            label_rows = list(sess.run("CALL db.labels() YIELD label"))
+            labels = [r["label"] for r in label_rows]
+            rel_rows = list(sess.run("CALL db.relationshipTypes() YIELD relationshipType"))
+            rel_types = [r["relationshipType"] for r in rel_rows]
+
+        node_tables = []
+        for label in labels[:50]:
+            try:
+                with driver.session() as sess:
+                    result = sess.run(
+                        f"MATCH (n:`{label}`) WITH n LIMIT 1 "
+                        "RETURN keys(n) AS props, count(n) AS cnt"
+                    )
+                    row = result.single()
+                    props = row["props"] if row else []
+                    cnt = row["cnt"] if row else 0
+                columns = [{"name": p, "type": "property",
+                            "nullable": True, "key": "",
+                            "sensitive": _col_sensitive(p)} for p in props]
+                sens_cols = [c["name"] for c in columns if c["sensitive"]]
+                node_tables.append({
+                    "name": f":{label}",
+                    "row_count": cnt,
+                    "columns": columns,
+                    "sensitive": bool(sens_cols),
+                    "sensitive_columns": sens_cols,
+                })
+            except Exception:
+                pass
+        schema["databases"].append({"name": "node_labels", "tables": node_tables})
+        schema["databases"].append({
+            "name": "relationship_types",
+            "tables": [{"name": rt, "row_count": 0, "columns": [],
+                        "sensitive": False, "sensitive_columns": []}
+                       for rt in rel_types[:50]]
+        })
+    except Exception as e:
+        out.log_error("enumerate_schema_neo4j", str(e))
+    out.write_schema(schema)
+    return schema
+
+
+# ---------------------------------------------------------------------------
+# NVD CVE updater
+# ---------------------------------------------------------------------------
+def _update_cves_from_nvd(catalogue_dir: Path, db_type: str) -> None:
+    import urllib.request
+    import urllib.parse
+    cache_file = catalogue_dir / "cve_cache.json"
+    try:
+        cache = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+    except Exception:
+        cache = {}
+
+    keywords = {
+        "mysql": "MySQL", "mariadb": "MariaDB", "postgresql": "PostgreSQL",
+        "mssql": "SQL Server", "oracle": "Oracle Database",
+        "mongodb": "MongoDB", "redis": "Redis", "cassandra": "Apache Cassandra",
+        "elasticsearch": "Elasticsearch", "couchdb": "CouchDB",
+        "influxdb": "InfluxDB", "neo4j": "Neo4j", "memcached": "Memcached",
+    }
+    kw = keywords.get(db_type, db_type)
+    url = (f"https://services.nvd.nist.gov/rest/json/cves/2.0?"
+           f"keywordSearch={urllib.parse.quote_plus(kw)}&resultsPerPage=20")
+    _console.log(f"Fetching CVEs for {kw} from NVD...", "INFO")
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", f"Auger/{VERSION}")
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read())
+        vulns = data.get("vulnerabilities", [])
+        fetched = []
+        for v in vulns:
+            cve_id = v.get("cve", {}).get("id", "")
+            metrics = v.get("cve", {}).get("metrics", {})
+            cvss = 0.0
+            for k in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                if k in metrics and metrics[k]:
+                    cvss = metrics[k][0].get("cvssData", {}).get("baseScore", 0.0)
+                    break
+            desc_list = v.get("cve", {}).get("descriptions", [])
+            desc = next((d["value"] for d in desc_list if d["lang"] == "en"), "")
+            fetched.append({"cve": cve_id, "cvss": cvss, "desc": desc[:200]})
+        cache[db_type] = {"updated_at": datetime.now().isoformat(), "cves": fetched}
+        cache_file.write_text(json.dumps(cache, indent=2))
+        _console.log(f"  Fetched {len(fetched)} CVEs for {kw}", "SUCCESS")
+    except Exception as e:
+        _console.log(f"  NVD fetch failed: {e}", "WARNING")
+
+
+# ---------------------------------------------------------------------------
+# Settings file builder
+# ---------------------------------------------------------------------------
+def _build_settings_from_args(args) -> dict:
+    return {
+        "engagement": {
+            "consultant": "", "client_name": "", "client_short": "",
+            "consultant_email": "", "start_date": "", "end_date": ""
+        },
+        "scan": {
+            "project": args.project or "auger_output",
+            "host": args.host or "",
+            "port": args.port or 0,
+            "db_type": args.db_type or "",
+            "username": args.username or "",
+            "password": args.password or "",
+            "database": args.database or "",
+            "jdbc": args.jdbc or "",
+            "auth_type": args.auth_type or "password",
+            "ssl": args.ssl,
+            "ssl_ca": args.ssl_ca or "",
+            "ssl_cert": args.ssl_cert or "",
+            "ssl_key": args.ssl_key or "",
+            "ssl_verify": args.ssl_verify,
+            "aws_profile": args.aws_profile or "",
+            "aws_region": args.aws_region or "",
+            "timeout": args.timeout,
+            "threads": args.threads,
+            "cred_delay": getattr(args, "cred_delay", 0.5),
+            "update_cves": getattr(args, "update_cves", False),
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main audit orchestrator
+# ---------------------------------------------------------------------------
+def run_audit(cfg: dict) -> int:
+    scan = cfg.get("scan", {})
+
+    # Parse JDBC if provided
+    jdbc_str = scan.get("jdbc", "")
+    if jdbc_str:
+        jdbc = _parse_jdbc(jdbc_str)
+        scan.setdefault("host",     jdbc["host"])
+        scan.setdefault("port",     jdbc["port"])
+        scan.setdefault("db_type",  jdbc["db_type"])
+        scan.setdefault("database", jdbc["database"])
+
+    host        = scan.get("host", "")
+    port        = int(scan.get("port", 0))
+    db_type     = scan.get("db_type", "").lower().strip()
+    username    = scan.get("username", "")
+    password    = scan.get("password", "")
+    database    = scan.get("database", "")
+    ssl_en      = bool(scan.get("ssl", False))
+    timeout     = int(scan.get("timeout", 10))
+    project     = scan.get("project", "auger_output")
+    cred_delay  = float(scan.get("cred_delay", 0.5))
+    update_cves = bool(scan.get("update_cves", False))
+    auth_type   = scan.get("auth_type", "password")
+    aws_profile = scan.get("aws_profile", "")
+    aws_region  = scan.get("aws_region", "us-east-1")
+
+    # Normalise db_type aliases
+    _aliases = {
+        "postgres": "postgresql", "pg": "postgresql",
+        "mysql": "mysql", "mariadb": "mariadb",
+        "sqlserver": "mssql", "mssql": "mssql",
+        "oracle": "oracle",
+        "mongo": "mongodb", "mongodb": "mongodb",
+        "redis": "redis",
+        "cassandra": "cassandra",
+        "elasticsearch": "elasticsearch", "elastic": "elasticsearch",
+        "es": "elasticsearch",
+        "couchdb": "couchdb", "couch": "couchdb",
+        "influxdb": "influxdb", "influx": "influxdb",
+        "neo4j": "neo4j",
+        "memcached": "memcached",
+        "redshift": "redshift",
+    }
+    db_type = _aliases.get(db_type, db_type)
+
+    if not port:
+        port = _default_port(db_type)
+
+    if not host:
+        _console.error("No target host specified.")
+        return 1
+    if not db_type:
+        _console.error("No database type specified (--db-type).")
+        return 1
+
+    out = AugerOutput(project, db_type, host, port)
+
+    # Optional: update CVEs from NVD before audit
+    if update_cves:
+        catalogue_dir = Path(__file__).parent / "catalogue"
+        _update_cves_from_nvd(catalogue_dir, db_type)
+
+    # Load checkpoint for resume support
+    cp = out.load_checkpoint()
+    if cp.get("host") == host and cp.get("port") == port and cp.get("db_type") == db_type:
+        _console.log(f"Resuming from checkpoint: {cp.get('completed_phases', [])}", "INFO")
+
+    _console.log(f"Auger v{VERSION} — {db_type.upper()} audit of {host}:{port}", "INFO")
+    _console.status("connectivity", label="Connectivity", step="tcp_probe", status="running")
+
+    # Phase 1: Connectivity check
+    if not _tcp_open(host, port, timeout=5.0):
+        _console.error(f"Port {port} on {host} is not reachable.")
+        out.log_step(f"FAIL: TCP {host}:{port} unreachable")
+        return 2
+
+    _console.log(f"TCP {host}:{port} open", "SUCCESS")
+    out.log_step(f"TCP {host}:{port} open")
+
+    # Network / TLS checks
+    run_network_phase(host, port, out)
+
+    _console.status("connectivity", label="Connectivity", status="complete")
+
+    # Phase 2: DB-type specific audit
+    db_version   = ""
+    phases_run   = ["connectivity", "network"]
+    auth_success = False
+
+    # Crucible prompt before default credential checks (when Crucible-managed)
+    def _cred_prompt():
+        if _CRUCIBLE_MANAGED:
+            entry = json.dumps({
+                "message": "About to test default credentials. Proceed?",
+                "choices": ["yes", "no"], "default": "yes"
+            })
+            sys.stdout.write(_CP_PROMPT + entry + "\n")
+            sys.stdout.flush()
+        if cred_delay > 0:
+            time.sleep(cred_delay)
+
+    if db_type in ("mysql", "mariadb"):
+        auditor = MySQLAuditor(host, port, username, password, database, out,
+                               ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            scan_sensitive_columns_mysql(auditor._conn, out, db_version)
+            enumerate_schema_mysql(auditor._conn, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._conn.close()
+        else:
+            _console.error("MySQL authentication failed.")
+
+    elif db_type == "postgresql":
+        auditor = PostgreSQLAuditor(host, port, username, password, database, out,
+                                     ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            scan_sensitive_columns_pg(auditor._conn, out, db_version)
+            enumerate_schema_pg(auditor._conn, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._conn.close()
+        else:
+            _console.error("PostgreSQL authentication failed.")
+
+    elif db_type == "redshift":
+        # AWS Redshift: IAM auth token generation if auth_type == "iam"
+        if auth_type == "iam":
+            try:
+                import boto3
+                session = boto3.Session(
+                    profile_name=aws_profile or None,
+                    region_name=aws_region
+                )
+                rds = session.client("rds", region_name=aws_region)
+                password = rds.generate_db_auth_token(
+                    DBHostname=host, Port=port,
+                    DBUsername=username, Region=aws_region
+                )
+                _console.log("Redshift IAM token generated", "SUCCESS")
+            except Exception as e:
+                _console.log(f"Redshift IAM token generation failed: {e}", "WARNING")
+        # Redshift uses PostgreSQL wire protocol
+        auditor = PostgreSQLAuditor(host, port, username, password, database, out,
+                                     ssl_enabled=True, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            enumerate_schema_pg(auditor._conn, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._conn.close()
+        else:
+            _console.error("Redshift authentication failed.")
+
+    elif db_type == "mssql":
+        auditor = MSSQLAuditor(host, port, username, password, database, out, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = ""
+            enumerate_schema_mssql(auditor._conn, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._conn.close()
+        else:
+            _console.error("MSSQL authentication failed.")
+
+    elif db_type == "oracle":
+        auditor = OracleAuditor(host, port, username, password, database, out,
+                                ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            enumerate_schema_oracle(auditor._conn, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._conn.close()
+        else:
+            _cred_prompt()
+            _console.error("Oracle authentication failed.")
+
+    elif db_type == "mongodb":
+        auditor = MongoDBauditor(host, port, username, password, database, out,
+                                  ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            enumerate_schema_mongodb(auditor._client, out, db_version)
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor._client.close()
+        else:
+            _console.error("MongoDB authentication failed.")
+
+    elif db_type == "redis":
+        auditor = RedisAuditor(host, port, password, out, ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            db_version = auditor._version
+            enumerate_schema_redis(auditor._client, out, db_version)
+            phases_run.extend(extra)
+        else:
+            _console.error("Redis authentication failed.")
+
+    elif db_type == "cassandra":
+        auditor = CassandraAuditor(host, port, username, password, database, out,
+                                    ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            db_version = auditor._version
+            enumerate_schema_cassandra(auditor._session, out, db_version)
+            phases_run.extend(extra)
+        else:
+            _console.error("Cassandra authentication failed.")
+
+    elif db_type == "elasticsearch":
+        auditor = ElasticsearchAuditor(host, port, username, password, out,
+                                        ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            db_version = auditor._version
+            enumerate_schema_elasticsearch(auditor, out, db_version)
+            phases_run.extend(extra)
+        else:
+            _console.error("Elasticsearch connection failed.")
+
+    elif db_type == "couchdb":
+        auditor = CouchDBAuditor(host, port, username, password, out,
+                                  ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            enumerate_schema_couchdb(auditor, out, db_version)
+            _cred_prompt()
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+        else:
+            _console.error("CouchDB connection failed.")
+
+    elif db_type == "influxdb":
+        auditor = InfluxDBAuditor(host, port, username, password, out,
+                                   ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            _cred_prompt()
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+        else:
+            _console.error("InfluxDB connection failed.")
+
+    elif db_type == "neo4j":
+        auditor = Neo4jAuditor(host, port, username, password, out,
+                                ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            enumerate_schema_neo4j(auditor._driver, out, db_version)
+            _cred_prompt()
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor.close()
+        else:
+            _console.error("Neo4j authentication failed.")
+
+    elif db_type == "memcached":
+        auditor = MemcachedAuditor(host, port, out, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor.close()
+        else:
+            _console.error("Memcached connection failed.")
+
+    else:
+        _console.error(f"Database type '{db_type}' not supported.")
+        return 3
+
+    # Write checkpoint and summary
+    out.write_checkpoint(db_version, db_type, list(set(phases_run)), auth_success)
+    out.write_summary(db_version, db_type, auth_success, list(set(phases_run)))
+
+    try:
+        findings = json.loads(out.findings_json.read_text())
+    except Exception:
+        findings = []
+    risk_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    for f in findings:
+        r = f.get("risk", "INFO").upper()
+        risk_counts[r] = risk_counts.get(r, 0) + 1
+    needs_validation = sum(1 for f in findings if f.get("validation_required"))
+
+    _console.log("=" * 60, "INFO")
+    _console.log(f"Audit complete — {db_type.upper()} {host}:{port}", "SUCCESS")
+    _console.log(f"Findings: {len(findings)} total | "
+                 f"CRITICAL={risk_counts['CRITICAL']} HIGH={risk_counts['HIGH']} "
+                 f"MEDIUM={risk_counts['MEDIUM']} LOW={risk_counts['LOW']} "
+                 f"INFO={risk_counts['INFO']}", "INFO")
+    if needs_validation:
+        _console.log(f"Findings requiring manual validation: {needs_validation}", "WARNING")
+    _console.log(f"Output: {out.root}", "INFO")
+
+    _console.status("complete", label="Audit Complete", status="complete",
+                    progress=len(findings), total=len(findings))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="auger.py",
+        description=f"Auger v{VERSION} — Database Security Auditor",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Supported database types:
+  mysql, mariadb, postgresql, mssql, oracle, mongodb, redis,
+  cassandra, elasticsearch, couchdb, influxdb, neo4j, memcached
+
+Examples:
+  python3 auger.py --host 10.0.0.1 --db-type mysql --username root --password secret
+  python3 auger.py --jdbc "jdbc:postgresql://db.example.com:5432/prod" -U postgres -P pass
+  python3 auger.py --host redis.example.com --db-type redis --password supersecret --ssl
+  python3 auger.py --settings /path/to/auger_settings.json
+"""
+    )
+    p.add_argument("--settings",    metavar="FILE",   help="JSON settings file (Crucible mode)")
+    p.add_argument("--host",        metavar="HOST",   help="Target host/IP")
+    p.add_argument("--port",        metavar="PORT",   type=int, default=0)
+    p.add_argument("--db-type",     metavar="TYPE",   help="Database type",
+                   choices=["mysql","mariadb","postgresql","postgres","mssql","oracle",
+                            "mongodb","redis","cassandra","elasticsearch","elastic","es",
+                            "couchdb","influxdb","neo4j","memcached","redshift","dynamodb"])
+    p.add_argument("-U", "--username", metavar="USER", default="")
+    p.add_argument("-P", "--password", metavar="PASS", default="")
+    p.add_argument("--database",    metavar="DB",     default="",  help="Database/schema name")
+    p.add_argument("--jdbc",        metavar="URL",    default="",  help="JDBC connection string")
+    p.add_argument("--auth-type",   metavar="TYPE",   default="password",
+                   choices=["password","ssl","kerberos","ldap","iam"])
+    p.add_argument("--ssl",         action="store_true", help="Enable SSL/TLS")
+    p.add_argument("--ssl-ca",      metavar="FILE",   default="")
+    p.add_argument("--ssl-cert",    metavar="FILE",   default="")
+    p.add_argument("--ssl-key",     metavar="FILE",   default="")
+    p.add_argument("--ssl-verify",  action="store_true")
+    p.add_argument("--aws-profile", metavar="PROFILE", default="")
+    p.add_argument("--aws-region",  metavar="REGION",  default="")
+    p.add_argument("--timeout",     type=int, default=10)
+    p.add_argument("--threads",     type=int, default=4)
+    p.add_argument("--project",     metavar="DIR",    default="auger_output",
+                   help="Output directory")
+    p.add_argument("--cred-delay",  type=float, default=0.5, dest="cred_delay",
+                   help="Seconds to pause between credential attempts (default: 0.5)")
+    p.add_argument("--update-cves", action="store_true", dest="update_cves",
+                   help="Fetch latest CVEs from NVD before audit")
+    p.add_argument("--version",     action="version", version=f"Auger v{VERSION}")
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def main() -> int:
+    args = _parse_args()
+
+    if args.settings:
+        cfg_path = Path(args.settings)
+        if not cfg_path.exists():
+            _console.error(f"Settings file not found: {args.settings}")
+            return 1
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            _console.error(f"Failed to parse settings: {e}")
+            return 1
+    else:
+        cfg = _build_settings_from_args(args)
+
+    return run_audit(cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
