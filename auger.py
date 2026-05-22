@@ -30,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.1.0"
+VERSION = "1.4.0"
 
 # ---------------------------------------------------------------------------
 # Crucible protocol tokens (same as Fracture/Siphon)
@@ -391,9 +391,15 @@ class AugerOutput:
             "owasp":              owasp,
             "owasp_url":          owasp_url,
             "owasp_asvs":         owasp_asvs,
-            "iso_27001":          iso_27001,
-            "pci_dss":            pci_dss,
+            # v1.1 compliance lists — wrap scalars as single-element lists.
+            # iso_27001 / pci_dss_4 / nist_800_53 are list-valued per v1.1
+            # spec so multiple controls per finding are representable.
+            "iso_27001":          [iso_27001] if iso_27001 else [],
+            "pci_dss_4":          [pci_dss] if pci_dss else [],
+            "nist_800_53":        [nist] if nist else [],
+            # Legacy scalar HIPAA stays as a string (no v1.1 list form yet)
             "hipaa":              hipaa,
+            # Keep scalar 'nist' for backward compat with consumers expecting it
             "nist":               nist,
             "remediation":        remediation,
             "db_type":            self.db_type,
@@ -402,6 +408,8 @@ class AugerOutput:
             "validation_required": validation_required,
             "validation_notes":   validation_notes,
             "catalogue_id":       catalogue_id,
+            # v1.1 confidence derives from Auger's validation_required flag
+            "confidence":         "Tentative" if validation_required else "Firm",
         }
         with self._findings_lock:
             key = (title.strip().lower(), self.host, self.port)
@@ -3626,6 +3634,51 @@ def _build_settings_from_args(args) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Universal meta dual-write (Tier 1 migration)
+# ---------------------------------------------------------------------------
+def _u_augment_findings(findings_json_path, *, tool, scope=None, phase=""):
+    """Read findings.json, fill missing universal fields, atomic-write back."""
+    try:
+        import sys as _s
+        if "/opt/pr0t31n/shared" not in _s.path:
+            _s.path.insert(0, "/opt/pr0t31n/shared")
+        import pr0t31n_schema as _us
+    except ImportError:
+        return 0
+    try:
+        return _us.augment_findings_file(findings_json_path,
+                                          tool=tool, scope=scope, phase=phase)
+    except Exception:
+        return 0
+
+
+def _u_dual_write_meta(project_dir, *, tool, version,
+                       client_short="", client_name="",
+                       engagement_name="", target=""):
+    """Dual-write universal meta.json (schema 1.0). Graceful no-op when
+    /opt/pr0t31n/shared/pr0t31n_schema.py is not installed."""
+    try:
+        import sys as _s
+        if "/opt/pr0t31n/shared" not in _s.path:
+            _s.path.insert(0, "/opt/pr0t31n/shared")
+        import pr0t31n_schema as _us
+    except ImportError:
+        return False
+    try:
+        meta = _us.make_meta(
+            tool=tool, version=version,
+            client_short=client_short or "unknown",
+            client_name=client_name or client_short or "unknown",
+            engagement_name=engagement_name or f"{tool} run",
+            target=target or "",
+        )
+        _us.atomic_write_json(Path(project_dir) / "meta.json", meta)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main audit orchestrator
 # ---------------------------------------------------------------------------
 def run_audit(cfg: dict) -> int:
@@ -3685,6 +3738,16 @@ def run_audit(cfg: dict) -> int:
         return 1
 
     out = AugerOutput(project, db_type, host, port)
+
+    # Dual-write universal meta.json (schema 1.0) for Prometheus UniversalParser.
+    _eng = cfg.get("engagement", {})
+    _u_dual_write_meta(
+        out.root, tool="auger", version=VERSION,
+        client_short=_eng.get("client_short", ""),
+        client_name=_eng.get("client_name", ""),
+        engagement_name=_eng.get("engagement_name", ""),
+        target=f"{db_type}://{host}:{port}",
+    )
 
     # Optional: update CVEs from NVD before audit
     if update_cves:
@@ -3919,6 +3982,8 @@ def run_audit(cfg: dict) -> int:
     # Write checkpoint and summary
     out.write_checkpoint(db_version, db_type, list(set(phases_run)), auth_success)
     out.write_summary(db_version, db_type, auth_success, list(set(phases_run)))
+    # Augment findings.json with universal-required fields (idempotent).
+    _u_augment_findings(out.findings_json, tool="auger", scope=None)
 
     try:
         findings = json.loads(out.findings_json.read_text())
