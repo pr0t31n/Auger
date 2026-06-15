@@ -30,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.4.0"
+VERSION = "1.8.0"
 
 # ---------------------------------------------------------------------------
 # Crucible protocol tokens (same as Fracture/Siphon)
@@ -691,17 +691,45 @@ class MySQLAuditor:
                 output=f"VERSION(): {ver}", db_version=ver,
                 command="SELECT VERSION()"
             )
-        # CVE check
+        # CVE check — 2026-06-11 review: was using bare startswith() which
+        # over-matched patched mid-minor releases. Now compares against
+        # cve["fixed_in"] if catalogue entry has it (semantic version compare),
+        # otherwise falls back to startswith with confidence:Tentative.
         for cve in _KNOWN_CVES.get(db_type, []):
-            if any(ver.startswith(v) for v in cve["versions"]):
-                self.out.add_finding(
-                    title=f"Known CVE in MySQL Version: {cve['cve']}",
-                    risk="HIGH", phase="version", catalogue_id="DB-010",
-                    description=cve["desc"],
-                    output=f"Version: {ver}  CVE: {cve['cve']}  CVSS: {cve['cvss']}",
-                    cves=cve["cve"], db_version=ver,
-                    command="SELECT VERSION()"
-                )
+            _matched = any(ver.startswith(v) for v in cve["versions"])
+            if not _matched:
+                continue
+            _fixed_in = cve.get("fixed_in")
+            _confidence = "Certain"
+            if _fixed_in:
+                try:
+                    def _vt(v: str): return tuple(int(x) for x in v.split(".")[:4] if x.isdigit())
+                    if _vt(ver) >= _vt(_fixed_in):
+                        # Patched — skip emission.
+                        continue
+                except Exception:
+                    _confidence = "Tentative"  # parse failure; report but mark
+            else:
+                # No fixed_in available — emit but flag as Tentative since
+                # mid-minor patches may already include the fix.
+                _confidence = "Tentative"
+            # Risk derived from CVSS if available, falling back to HIGH.
+            _cvss = float(cve.get("cvss", 0.0) or 0.0)
+            if   _cvss >= 9.0: _risk = "CRITICAL"
+            elif _cvss >= 7.0: _risk = "HIGH"
+            elif _cvss >= 4.0: _risk = "MEDIUM"
+            elif _cvss >  0.0: _risk = "LOW"
+            else:              _risk = "HIGH"
+            self.out.add_finding(
+                title=f"Known CVE in MySQL Version: {cve['cve']}",
+                risk=_risk, phase="version", catalogue_id="DB-010",
+                description=cve["desc"] + (
+                    f" Confidence: {_confidence} (no fixed_in in catalogue; "
+                    "verify against vendor advisory)." if _confidence == "Tentative" else ""),
+                output=f"Version: {ver}  CVE: {cve['cve']}  CVSS: {cve['cvss']}  Confidence: {_confidence}",
+                cves=cve["cve"], db_version=ver,
+                command="SELECT VERSION()"
+            )
         return ver
 
     def check_anonymous_users(self):
@@ -848,6 +876,91 @@ class MySQLAuditor:
                 pci_dss="4.2.1", hipaa="164.312(e)(1)", db_version=self._version
             )
 
+    def check_encryption_at_rest(self):
+        """2026-06-11 review: MySQL encryption-at-rest visibility.
+
+        Three checks:
+          1. innodb_redo_log_encrypt + innodb_undo_log_encrypt
+          2. binlog_encryption
+          3. Keyring plugin presence (any of: keyring_file, keyring_okv,
+             keyring_aws, keyring_hashicorp, keyring_oci, MySQL Enterprise
+             Transparent Data Encryption (TDE))
+        """
+        # Three relevant variables
+        innodb_redo = self._var("innodb_redo_log_encrypt") or "OFF"
+        innodb_undo = self._var("innodb_undo_log_encrypt") or "OFF"
+        binlog_enc  = self._var("binlog_encryption") or "OFF"
+        # Keyring plugins
+        try:
+            plugins = self._q("SELECT plugin_name, plugin_status FROM information_schema.plugins "
+                               "WHERE plugin_name LIKE 'keyring%%' OR plugin_name LIKE '%%tde%%'")
+        except Exception:
+            plugins = []
+        active_keyring = [p for p in plugins
+                            if str(p.get("plugin_status","")).upper() == "ACTIVE"]
+        if not active_keyring:
+            self.out.add_finding(
+                title="MySQL Encryption-at-Rest: NO keyring plugin loaded",
+                risk="HIGH", phase="encryption", catalogue_id="DB-019",
+                description=("No keyring_file / keyring_okv / keyring_aws / keyring_hashicorp "
+                              "/ keyring_oci or TDE plugin is ACTIVE. InnoDB tablespace "
+                              "encryption requires a keyring plugin; without one, "
+                              "encryption-at-rest cannot be enabled."),
+                output=f"plugins: {plugins}",
+                command="SELECT plugin_name FROM information_schema.plugins WHERE plugin_name LIKE 'keyring%'",
+                owasp="A02:2021", nist="SC-28", pci_dss="3.4.1",
+                db_version=self._version)
+        if str(innodb_redo).upper() != "ON":
+            self.out.add_finding(
+                title="MySQL InnoDB Redo Log NOT Encrypted",
+                risk="MEDIUM", phase="encryption", catalogue_id="DB-019-A",
+                description="innodb_redo_log_encrypt=OFF — redo logs contain decrypted page data "
+                            "and are not encrypted at rest.",
+                output=f"innodb_redo_log_encrypt = {innodb_redo}",
+                command="SHOW VARIABLES LIKE 'innodb_redo_log_encrypt'",
+                db_version=self._version)
+        if str(innodb_undo).upper() != "ON":
+            self.out.add_finding(
+                title="MySQL InnoDB Undo Log NOT Encrypted",
+                risk="MEDIUM", phase="encryption", catalogue_id="DB-019-B",
+                description="innodb_undo_log_encrypt=OFF — undo logs are not encrypted at rest.",
+                output=f"innodb_undo_log_encrypt = {innodb_undo}",
+                command="SHOW VARIABLES LIKE 'innodb_undo_log_encrypt'",
+                db_version=self._version)
+        if str(binlog_enc).upper() != "ON":
+            self.out.add_finding(
+                title="MySQL Binary Log NOT Encrypted",
+                risk="MEDIUM", phase="encryption", catalogue_id="DB-019-C",
+                description="binlog_encryption=OFF — binary logs (and relay logs) are unencrypted.",
+                output=f"binlog_encryption = {binlog_enc}",
+                command="SHOW VARIABLES LIKE 'binlog_encryption'",
+                db_version=self._version)
+
+    def check_audit_log_plugin(self):
+        """2026-06-11 review: MySQL Enterprise audit_log plugin or MariaDB
+        server_audit plugin presence. general_log is NOT a substitute —
+        it's transactional, not security-event oriented.
+        """
+        try:
+            plugins = self._q("SELECT plugin_name, plugin_status FROM information_schema.plugins "
+                               "WHERE plugin_name IN ('audit_log','server_audit','keyring_audit')")
+        except Exception:
+            plugins = []
+        active = [p for p in plugins
+                    if str(p.get("plugin_status","")).upper() == "ACTIVE"]
+        if not active:
+            self.out.add_finding(
+                title="MySQL Security Audit Log NOT Enabled",
+                risk="MEDIUM", phase="logging", catalogue_id="DB-018",
+                description=("Neither MySQL Enterprise audit_log nor MariaDB server_audit "
+                              "plugin is ACTIVE. general_log is transactional and not "
+                              "an adequate substitute. Compliance frameworks (PCI DSS 10.x, "
+                              "HIPAA 164.312(b)) require security-event audit logging."),
+                output=f"plugins: {plugins}",
+                command="SELECT plugin_name FROM information_schema.plugins WHERE plugin_name IN ('audit_log','server_audit')",
+                owasp="A09:2021", nist="AU-2", pci_dss="10.2.1", hipaa="164.312(b)",
+                db_version=self._version)
+
     def check_symlinks(self):
         val = self._var("have_symlink")
         if val == "yes":
@@ -933,9 +1046,15 @@ class MySQLAuditor:
             if user == self.username and pwd == self.password:
                 continue
             try:
+                # connect_timeout derived from --timeout per 2026-06-11 review.
+                # The hard-coded 4s was timing out legitimate slow DBs before
+                # the user-supplied --timeout fired. New formula: max(4, half
+                # the user value) keeps credential probes responsive AND honours
+                # explicit --timeout escalation for high-latency targets.
+                _ct = max(4, self.timeout // 2)
                 c = pymysql.connect(host=self.host, port=self.port,
                                     user=user, password=pwd,
-                                    connect_timeout=4, ssl={"ssl_disabled": True})
+                                    connect_timeout=_ct, ssl={"ssl_disabled": True})
                 c.close()
                 self.out.add_finding(
                     title="Default Credentials in Use",
@@ -962,7 +1081,9 @@ class MySQLAuditor:
             (self.check_wildcard_hosts, "accounts"),
             (self.check_password_policy, "config"),
             (self.check_general_log, "logging"),
+            (self.check_audit_log_plugin, "logging"),     # 2026-06-11 review
             (self.check_ssl_config, "network"),
+            (self.check_encryption_at_rest, "encryption"),  # 2026-06-11 review
             (self.check_symlinks, "config"),
             (self.check_bind_address, "config"),
             (self.check_user_privileges, "permissions"),
@@ -1174,9 +1295,11 @@ class PostgreSQLAuditor:
             if user == self.username and pwd == self.password:
                 continue
             try:
+                # See pymysql connect_timeout note (2026-06-11 review).
+                _ct = max(4, self.timeout // 2)
                 c = psycopg2.connect(host=self.host, port=self.port,
                                      user=user, password=pwd,
-                                     dbname="postgres", connect_timeout=4,
+                                     dbname="postgres", connect_timeout=_ct,
                                      sslmode="prefer")
                 c.close()
                 self.out.add_finding(
@@ -1214,6 +1337,64 @@ class PostgreSQLAuditor:
                 command="SHOW listen_addresses", db_version=self._version
             )
 
+    def check_pgcrypto_extension(self):
+        """2026-06-11 review: pgcrypto presence for column-level encryption."""
+        try:
+            rows = self._q("SELECT extname FROM pg_extension WHERE extname='pgcrypto'")
+        except Exception:
+            rows = []
+        if not rows:
+            self.out.add_finding(
+                title="PostgreSQL pgcrypto extension NOT installed",
+                risk="LOW", phase="encryption", catalogue_id="DB-PG-019",
+                description=("pgcrypto provides column-level encryption + secure-random + "
+                              "hashing primitives. Without it, app-level encryption must be "
+                              "implemented elsewhere. Install with: "
+                              "CREATE EXTENSION pgcrypto;"),
+                output="pg_extension does not include pgcrypto",
+                command="SELECT extname FROM pg_extension WHERE extname='pgcrypto'",
+                owasp="A02:2021", nist="SC-28", db_version=self._version)
+
+    def check_pg_audit_extension(self):
+        """2026-06-11 review: pg_audit security-event audit logging."""
+        try:
+            rows = self._q("SELECT extname FROM pg_extension WHERE extname='pgaudit'")
+        except Exception:
+            rows = []
+        if not rows:
+            self.out.add_finding(
+                title="PostgreSQL pgaudit extension NOT installed",
+                risk="MEDIUM", phase="logging", catalogue_id="DB-PG-018",
+                description=("pgaudit provides session and object audit logging that meets "
+                              "PCI DSS 10.x and HIPAA audit requirements. log_statement='all' "
+                              "is too verbose for compliance use. "
+                              "Install: CREATE EXTENSION pgaudit;"),
+                output="pg_extension does not include pgaudit",
+                command="SELECT extname FROM pg_extension WHERE extname='pgaudit'",
+                owasp="A09:2021", nist="AU-2", pci_dss="10.2.1",
+                db_version=self._version)
+
+    def check_data_directory_perms(self):
+        """2026-06-11 review: data_directory should be 0700 owned by postgres.
+        We can only verify the path, not the on-disk perms, from a remote
+        connection — so we surface the path and INFO the operator to verify."""
+        try:
+            rows = self._q("SHOW data_directory")
+            d = rows[0]["data_directory"] if rows else ""
+        except Exception:
+            d = ""
+        if d:
+            self.out.add_finding(
+                title=f"PostgreSQL data_directory: {d}",
+                risk="INFO", phase="config", catalogue_id="DB-PG-020",
+                description=(f"PostgreSQL data_directory is {d}. Verify on-host "
+                              "permissions: must be 0700 and owned by postgres. "
+                              "World/group-readable data dirs leak the on-disk "
+                              "files even when DB auth is enforced."),
+                output=f"data_directory = {d}",
+                command="SHOW data_directory; ls -la <dir>",
+                db_version=self._version)
+
     def run(self, db_version: str) -> list:
         phases = []
         for method, phase in [
@@ -1225,9 +1406,12 @@ class PostgreSQLAuditor:
             (self.check_public_schema_perms, "permissions"),
             (self.check_row_security, "permissions"),
             (self.check_logging, "logging"),
+            (self.check_pg_audit_extension, "logging"),      # 2026-06-11 review
             (self.check_extensions, "config"),
             (self.check_copy_program, "config"),
             (self.check_listen_addresses, "config"),
+            (self.check_pgcrypto_extension, "encryption"),    # 2026-06-11 review
+            (self.check_data_directory_perms, "config"),       # 2026-06-11 review
         ]:
             _console.status("postgresql", label=f"PostgreSQL {phase}", step=method.__name__,
                             status="running")
@@ -1500,6 +1684,121 @@ class MSSQLAuditor:
             except Exception:
                 pass
 
+    def check_always_encrypted(self):
+        """2026-06-11 review: MSSQL Always Encrypted column visibility.
+
+        Always Encrypted (since SQL Server 2016) keeps data encrypted at
+        the column level — server never sees plaintext. We surface its
+        presence (INFO when used) and ABSENCE on tables containing
+        sensitive columns (HIGH when missing on PII-shaped column names).
+        """
+        try:
+            # Tables/columns with Always Encrypted
+            ae_rows = self._q("""SELECT t.name AS table_name, c.name AS column_name,
+                                  c.encryption_type_desc, c.encryption_algorithm_name
+                                  FROM sys.columns c
+                                  JOIN sys.tables t ON t.object_id = c.object_id
+                                  WHERE c.encryption_type IS NOT NULL""")
+        except Exception:
+            ae_rows = []
+        if ae_rows:
+            self.out.add_finding(
+                title=f"MSSQL Always Encrypted IN USE — {len(ae_rows)} encrypted columns",
+                risk="INFO", phase="crypto", catalogue_id="DB-MS-021-A",
+                description=("Always Encrypted is in use on the server. Encrypted "
+                              "columns: " + ", ".join(f"{r['table_name']}.{r['column_name']}"
+                                                       for r in ae_rows[:10])),
+                output="\n".join(f"{r['table_name']}.{r['column_name']} "
+                                  f"({r['encryption_type_desc']}, {r['encryption_algorithm_name']})"
+                                  for r in ae_rows[:50]),
+                command="SELECT FROM sys.columns WHERE encryption_type IS NOT NULL",
+                db_version=self._version)
+        # PII-shaped column names that are NOT encrypted
+        try:
+            pii_rows = self._q("""SELECT t.name AS table_name, c.name AS column_name
+                                    FROM sys.columns c
+                                    JOIN sys.tables t ON t.object_id = c.object_id
+                                    WHERE c.encryption_type IS NULL
+                                       AND (LOWER(c.name) LIKE '%ssn%'
+                                         OR LOWER(c.name) LIKE '%creditcard%'
+                                         OR LOWER(c.name) LIKE '%cardnumber%'
+                                         OR LOWER(c.name) LIKE '%passport%'
+                                         OR LOWER(c.name) LIKE '%dob%'
+                                         OR LOWER(c.name) LIKE '%birthdate%'
+                                         OR LOWER(c.name) LIKE '%taxid%')""")
+        except Exception:
+            pii_rows = []
+        if pii_rows:
+            self.out.add_finding(
+                title=f"MSSQL: {len(pii_rows)} PII-shaped column(s) NOT Always Encrypted",
+                risk="HIGH", phase="crypto", catalogue_id="DB-MS-021-B",
+                description=("Columns with PII-shaped names exist without "
+                              "Always Encrypted column encryption. PII / PCI "
+                              "scope columns should be encrypted at the column "
+                              "level so plaintext never traverses the network "
+                              "or sits on disk in plain form."),
+                output="\n".join(f"{r['table_name']}.{r['column_name']}"
+                                  for r in pii_rows[:50]),
+                command="SELECT FROM sys.columns WHERE encryption_type IS NULL AND name LIKE 'ssn'/'creditcard'/...",
+                owasp="A02:2021", nist="SC-28", pci_dss="3.4.1",
+                db_version=self._version)
+
+    def check_audit_destination(self):
+        """2026-06-11 review: MSSQL Server Audit destination check.
+
+        sys.server_audits records the destination. Audit logs that write
+        to APPLICATION LOG or the LOCAL FILE system on the DB host are
+        accessible to a compromised local admin and offer little forensic
+        value. SECURITY LOG (Windows Event) or external FILE on a SIEM-
+        ingested share are preferred.
+        """
+        try:
+            rows = self._q("""SELECT name, type_desc, on_failure_desc, is_state_enabled,
+                                       log_file_path
+                                  FROM sys.server_audits""")
+        except Exception:
+            rows = []
+        if not rows:
+            self.out.add_finding(
+                title="MSSQL Server Audit NOT configured",
+                risk="HIGH", phase="logging", catalogue_id="DB-MS-022",
+                description=("No SQL Server Audit objects exist. Without "
+                              "server-level audit, DDL/DML and login events are "
+                              "unlogged. Compliance frameworks (PCI DSS 10.x, "
+                              "HIPAA 164.312(b)) require audit logging."),
+                output="sys.server_audits is empty",
+                command="SELECT FROM sys.server_audits",
+                owasp="A09:2021", nist="AU-2", pci_dss="10.2.1",
+                db_version=self._version)
+            return
+        for r in rows:
+            dest = (r.get("type_desc") or "").upper()
+            if dest == "APPLICATION LOG":
+                self.out.add_finding(
+                    title=f"MSSQL Audit '{r['name']}' destination is APPLICATION_LOG",
+                    risk="MEDIUM", phase="logging", catalogue_id="DB-MS-022-A",
+                    description=("Audit destination is the Windows Application Event "
+                                  "Log — accessible to any local admin and easily "
+                                  "rotated/cleared. Prefer SECURITY LOG or a remote "
+                                  "FILE destination shipped to a SIEM."),
+                    output=str(dict(r)),
+                    command="SELECT type_desc FROM sys.server_audits",
+                    db_version=self._version)
+            elif dest == "FILE" and r.get("log_file_path"):
+                lfp = (r.get("log_file_path") or "").upper()
+                if lfp.startswith(("C:\\", "D:\\", "/VAR/", "/OPT/")) \
+                        and not lfp.startswith("\\\\"):   # not a UNC share
+                    self.out.add_finding(
+                        title=f"MSSQL Audit '{r['name']}' writes to LOCAL disk",
+                        risk="LOW", phase="logging", catalogue_id="DB-MS-022-B",
+                        description=("Audit log file path is a local-only disk "
+                                      "location. For tamper-evidence and central "
+                                      "retention, ship to a SIEM-ingested UNC share "
+                                      "or syslog forwarder."),
+                        output=f"log_file_path = {r['log_file_path']}",
+                        command="SELECT log_file_path FROM sys.server_audits",
+                        db_version=self._version)
+
     def run(self, db_version: str) -> list:
         phases = []
         for method, phase in [
@@ -1513,6 +1812,8 @@ class MSSQLAuditor:
             (self.check_builtin_admins, "permissions"),
             (self.check_password_policy, "config"),
             (self.check_tde, "crypto"),
+            (self.check_always_encrypted, "crypto"),    # 2026-06-11 review
+            (self.check_audit_destination, "logging"),  # 2026-06-11 review
             (self.check_ad_hoc_queries, "config"),
             (self.check_database_mail, "config"),
         ]:
@@ -1684,6 +1985,64 @@ class MongoDBauditor:
         except Exception:
             pass
 
+    def check_encryption_at_rest(self):
+        """2026-06-11 review: WiredTiger encryption-at-rest visibility."""
+        try:
+            result = self._client.admin.command("getCmdLineOpts")
+            wt_engine_cfg = (result.get("parsed", {})
+                              .get("storage", {})
+                              .get("engine", "wiredTiger"))
+            wt_cfg = (result.get("parsed", {})
+                       .get("storage", {})
+                       .get("wiredTiger", {})
+                       .get("engineConfig", {}))
+            encryption = (result.get("parsed", {})
+                           .get("security", {})
+                           .get("enableEncryption", False))
+        except Exception:
+            wt_engine_cfg = ""; wt_cfg = {}; encryption = False
+        if wt_engine_cfg != "wiredTiger":
+            return  # Other engines not in scope
+        if not encryption:
+            self.out.add_finding(
+                title="MongoDB WiredTiger Encryption-at-Rest NOT Enabled",
+                risk="HIGH", phase="encryption", catalogue_id="DB-MDB-019",
+                description=("MongoDB Enterprise supports WiredTiger native encryption "
+                              "via security.enableEncryption. Without it, all data files "
+                              "are stored unencrypted on disk. Compliance frameworks "
+                              "(HIPAA / PCI DSS 3.4) require at-rest encryption."),
+                output=f"security.enableEncryption = {encryption}, "
+                       f"storage.engine = {wt_engine_cfg}",
+                command="db.adminCommand('getCmdLineOpts')",
+                owasp="A02:2021", nist="SC-28",
+                db_version=self._version)
+
+    def check_oplog_exposure(self):
+        """2026-06-11 review: replica set oplog access requires explicit
+        roles (clusterMonitor/clusterManager); if any non-admin role can
+        access local.oplog.rs, that's a leak vector."""
+        try:
+            roles = self._client.admin.command("rolesInfo", {"rolesInfo": 1, "showPrivileges": True})
+            danger = []
+            for r in roles.get("roles", []):
+                for priv in (r.get("privileges") or []):
+                    res = priv.get("resource", {})
+                    if res.get("db") == "local" and res.get("collection") in ("oplog.rs", ""):
+                        if r.get("role") not in ("__system","clusterMonitor","clusterManager","backup"):
+                            danger.append(r["role"])
+            if danger:
+                self.out.add_finding(
+                    title=f"MongoDB: Non-system role(s) can read oplog.rs",
+                    risk="HIGH", phase="permissions", catalogue_id="DB-MDB-020",
+                    description=(f"Roles {danger} have access to local.oplog.rs. "
+                                  "Oplog records every database mutation; access allows "
+                                  "covert change-data-capture."),
+                    output=f"roles_with_oplog_access = {danger}",
+                    command="db.adminCommand('rolesInfo')",
+                    db_version=self._version)
+        except Exception:
+            pass
+
     def check_default_creds(self):
         from pymongo import MongoClient
         from pymongo.errors import OperationFailure
@@ -1719,6 +2078,8 @@ class MongoDBauditor:
             (self.check_tls, "network"),
             (self.check_users, "accounts"),
             (self.check_bind_ip, "config"),
+            (self.check_encryption_at_rest, "encryption"),  # 2026-06-11 review
+            (self.check_oplog_exposure, "permissions"),      # 2026-06-11 review
         ]:
             _console.status("mongodb", label=f"MongoDB {phase}", step=method.__name__,
                             status="running")
@@ -2046,8 +2407,10 @@ class CassandraAuditor:
                 continue
             try:
                 ap = PlainTextAuthProvider(username=user, password=pwd)
+                # 2026-06-11 review: connect_timeout from --timeout (not hardcoded 4s)
+                _ct = max(4, self.timeout // 2)
                 cl = Cluster([self.host], port=self.port, auth_provider=ap,
-                             connect_timeout=4)
+                             connect_timeout=_ct)
                 s = cl.connect()
                 s.shutdown()
                 cl.shutdown()
@@ -2069,7 +2432,8 @@ class CassandraAuditor:
         # Attempt a cleartext connection to probe TLS
         try:
             from cassandra.cluster import Cluster
-            cl = Cluster([self.host], port=self.port, connect_timeout=4)
+            _ct = max(4, self.timeout // 2)
+            cl = Cluster([self.host], port=self.port, connect_timeout=_ct)
             s = cl.connect()
             s.shutdown()
             cl.shutdown()
@@ -3025,6 +3389,453 @@ class MemcachedAuditor:
 
 
 # ---------------------------------------------------------------------------
+# DynamoDB Auditor — AWS managed key-value store (control-plane audit)
+# Fixes the 2026-06-11 review HIGH finding: dynamodb was advertised in
+# argparse + docstring but no auditor class existed.
+#
+# Audits the AWS DynamoDB control plane (not data plane): table encryption-
+# at-rest, point-in-time recovery, stream destinations, deletion protection,
+# resource-based policy public access. Auger does NOT modify the DB.
+# ---------------------------------------------------------------------------
+class DynamoDBAuditor:
+    """Authenticated DynamoDB control-plane audit via boto3.
+
+    Requires either AWS environment credentials (AWS_ACCESS_KEY_ID +
+    AWS_SECRET_ACCESS_KEY) or a profile (--aws-profile). Region selected
+    via --aws-region (defaults to us-east-1).
+    """
+    def __init__(self, *, aws_profile: str, aws_region: str,
+                 out: "AugerOutput", timeout: int = 30):
+        self.profile  = aws_profile or ""
+        self.region   = aws_region or "us-east-1"
+        self.out      = out
+        self.timeout  = max(int(timeout), 30)
+        self._client  = None
+        self._version = "AWS DynamoDB (managed)"
+
+    def connect(self) -> bool:
+        try:
+            import boto3
+            from botocore.config import Config
+        except ImportError:
+            _console.error("boto3 not installed (pip install boto3 --break-system-packages).")
+            return False
+        try:
+            cfg = Config(connect_timeout=self.timeout, read_timeout=self.timeout,
+                          retries={"max_attempts": 2})
+            if self.profile:
+                sess = boto3.Session(profile_name=self.profile, region_name=self.region)
+            else:
+                sess = boto3.Session(region_name=self.region)
+            self._client = sess.client("dynamodb", config=cfg)
+            # Ping
+            self._client.list_tables(Limit=1)
+            return True
+        except Exception as exc:
+            _console.error(f"DynamoDB connect failed: {exc}")
+            return False
+
+    def run(self, db_version: str) -> list:
+        phases: list = []
+        self._check_region_tables()
+        phases.append("inventory")
+        self._check_encryption_at_rest()
+        phases.append("encryption")
+        self._check_pitr()
+        phases.append("backup")
+        self._check_streams()
+        phases.append("streams")
+        self._check_deletion_protection()
+        phases.append("protection")
+        self._check_resource_policies()
+        phases.append("iam")
+        return phases
+
+    def _list_tables(self) -> list[str]:
+        try:
+            tables, token = [], None
+            while True:
+                kw = {"Limit": 100}
+                if token: kw["ExclusiveStartTableName"] = token
+                resp = self._client.list_tables(**kw)
+                tables.extend(resp.get("TableNames", []))
+                token = resp.get("LastEvaluatedTableName")
+                if not token: break
+            return tables
+        except Exception as exc:
+            self.out.add_finding(
+                title="DynamoDB ListTables failed",
+                risk="INFO", phase="inventory", catalogue_id="DB-DDB-000",
+                description=f"Could not enumerate tables: {exc}",
+                output=str(exc), command="dynamodb:ListTables")
+            return []
+
+    def _describe(self, table: str) -> dict:
+        try: return self._client.describe_table(TableName=table).get("Table", {})
+        except Exception: return {}
+
+    def _check_region_tables(self) -> None:
+        tables = self._list_tables()
+        self.out.add_finding(
+            title=f"DynamoDB tables in region {self.region}: {len(tables)}",
+            risk="INFO", phase="inventory", catalogue_id="DB-DDB-001",
+            description=f"Discovered {len(tables)} tables: {tables[:10]}{'…' if len(tables)>10 else ''}",
+            output="\n".join(tables[:200]),
+            command="aws dynamodb list-tables")
+
+    def _check_encryption_at_rest(self) -> None:
+        for t in self._list_tables():
+            d = self._describe(t)
+            sse = d.get("SSEDescription") or {}
+            status = sse.get("Status", "DISABLED")
+            kms_type = sse.get("SSEType", "")
+            if status != "ENABLED":
+                self.out.add_finding(
+                    title=f"DynamoDB Table {t}: Encryption-at-rest not enabled",
+                    risk="HIGH", phase="encryption", catalogue_id="DB-DDB-010",
+                    description=("Encryption-at-rest is disabled. AWS owns the encryption "
+                                  "key — fine for non-sensitive — but for regulated data, "
+                                  "enable AWS-KMS-CMK so the org controls key rotation."),
+                    output=f"Table={t} SSE.Status={status}",
+                    command=f"aws dynamodb describe-table --table-name {t}")
+            elif kms_type != "KMS":
+                self.out.add_finding(
+                    title=f"DynamoDB Table {t}: SSE enabled but using AWS-managed key",
+                    risk="LOW", phase="encryption", catalogue_id="DB-DDB-011",
+                    description=("SSE is enabled but the key is AWS-owned (default). "
+                                  "For sensitive workloads, use a customer-managed KMS key "
+                                  "to control key policy and rotation."),
+                    output=f"Table={t} SSEType={kms_type}",
+                    command=f"aws dynamodb describe-table --table-name {t}")
+
+    def _check_pitr(self) -> None:
+        for t in self._list_tables():
+            try:
+                resp = self._client.describe_continuous_backups(TableName=t)
+                pitr = ((resp.get("ContinuousBackupsDescription") or {})
+                        .get("PointInTimeRecoveryDescription") or {})
+                if pitr.get("PointInTimeRecoveryStatus") != "ENABLED":
+                    self.out.add_finding(
+                        title=f"DynamoDB Table {t}: Point-in-Time Recovery disabled",
+                        risk="MEDIUM", phase="backup", catalogue_id="DB-DDB-020",
+                        description="PITR allows restore to any second in the last 35 days. "
+                                    "Without it, ransom/corruption events are unrecoverable "
+                                    "beyond on-demand backups.",
+                        output=f"Table={t} PITR={pitr.get('PointInTimeRecoveryStatus','DISABLED')}",
+                        command=f"aws dynamodb describe-continuous-backups --table-name {t}")
+            except Exception:
+                pass
+
+    def _check_streams(self) -> None:
+        for t in self._list_tables():
+            d = self._describe(t)
+            if (d.get("StreamSpecification") or {}).get("StreamEnabled"):
+                # Streams enabled — check if a Lambda/Kinesis consumer is wired
+                self.out.add_finding(
+                    title=f"DynamoDB Table {t}: Stream enabled",
+                    risk="INFO", phase="streams", catalogue_id="DB-DDB-030",
+                    description="DynamoDB stream is enabled. Ensure consumer (Lambda / KCL) "
+                                "has appropriate IAM scope; streams carry full item data.",
+                    output=f"Table={t} ViewType={d['StreamSpecification'].get('StreamViewType')}",
+                    command=f"aws dynamodb describe-table --table-name {t}")
+
+    def _check_deletion_protection(self) -> None:
+        for t in self._list_tables():
+            d = self._describe(t)
+            if not d.get("DeletionProtectionEnabled", False):
+                self.out.add_finding(
+                    title=f"DynamoDB Table {t}: Deletion protection disabled",
+                    risk="LOW", phase="protection", catalogue_id="DB-DDB-040",
+                    description=("Deletion protection prevents accidental DropTable via IAM. "
+                                  "Enable for any production / regulated table."),
+                    output=f"Table={t} DeletionProtection=False",
+                    command=f"aws dynamodb describe-table --table-name {t}")
+
+    def _check_resource_policies(self) -> None:
+        for t in self._list_tables():
+            try:
+                resp = self._client.get_resource_policy(
+                    ResourceArn=self._describe(t).get("TableArn", ""))
+                policy = resp.get("Policy", "{}")
+                import json as _j
+                pol = _j.loads(policy)
+                for stmt in pol.get("Statement", []):
+                    pr = stmt.get("Principal", {})
+                    if pr == "*" or (isinstance(pr, dict) and pr.get("AWS") == "*"):
+                        self.out.add_finding(
+                            title=f"DynamoDB Table {t}: Resource policy grants Principal=*",
+                            risk="CRITICAL", phase="iam", catalogue_id="DB-DDB-050",
+                            description="Resource-based policy allows any AWS principal. "
+                                        "This effectively makes the table public to every "
+                                        "AWS account if the Condition block doesn't restrict.",
+                            output=f"Table={t}\nPolicy: {policy[:2000]}",
+                            command=f"aws dynamodb get-resource-policy --resource-arn ...")
+            except self._client.exceptions.PolicyNotFoundException:
+                continue
+            except Exception:
+                continue
+
+    def close(self) -> None:
+        self._client = None
+
+
+# ---------------------------------------------------------------------------
+# RDS Auditor — AWS managed RDS / Aurora control-plane audit
+# 2026-06-11 review: native boto3 audit complementing the in-engine audits.
+# Audits RDS instances (encryption-at-rest, backups, publicly-accessible,
+# parameter group drift, IAM auth) and the cluster-level Aurora settings.
+# ---------------------------------------------------------------------------
+class RDSAuditor:
+    """Authenticated AWS RDS / Aurora control-plane audit via boto3.
+
+    Requires AWS credentials (env or --aws-profile). Region from --aws-region.
+    Does NOT connect to the underlying DB engine — Auger's other auditors
+    handle that. This class focuses on the AWS control-plane surface."""
+
+    def __init__(self, *, aws_profile: str, aws_region: str,
+                  out: "AugerOutput", timeout: int = 30):
+        self.profile = aws_profile or ""
+        self.region  = aws_region or "us-east-1"
+        self.out     = out
+        self.timeout = max(int(timeout), 30)
+        self._rds    = None
+        self._cloudwatch = None
+        self._version = "AWS RDS (managed)"
+
+    def connect(self) -> bool:
+        try:
+            import boto3
+            from botocore.config import Config
+        except ImportError:
+            _console.error("boto3 not installed (pip install boto3 --break-system-packages).")
+            return False
+        try:
+            cfg = Config(connect_timeout=self.timeout, read_timeout=self.timeout,
+                          retries={"max_attempts": 2})
+            sess = (boto3.Session(profile_name=self.profile, region_name=self.region)
+                     if self.profile else boto3.Session(region_name=self.region))
+            self._rds = sess.client("rds", config=cfg)
+            self._cloudwatch = sess.client("cloudwatch", config=cfg)
+            # Ping
+            self._rds.describe_db_instances(MaxRecords=20)
+            return True
+        except Exception as exc:
+            _console.error(f"RDS connect failed: {exc}")
+            return False
+
+    def run(self, db_version: str) -> list:
+        phases: list = []
+        instances = self._list_instances()
+        clusters  = self._list_clusters()
+        self._check_inventory(instances, clusters)
+        phases.append("inventory")
+        for inst in instances:
+            self._check_instance(inst)
+        phases.append("instance")
+        for cluster in clusters:
+            self._check_cluster(cluster)
+        phases.append("cluster")
+        self._check_snapshots()
+        phases.append("snapshots")
+        return phases
+
+    # ── Discovery ──
+
+    def _list_instances(self) -> list:
+        instances = []
+        try:
+            paginator = self._rds.get_paginator("describe_db_instances")
+            for page in paginator.paginate():
+                instances.extend(page.get("DBInstances", []))
+        except Exception as exc:
+            self.out.add_finding(
+                title="RDS DescribeDBInstances failed",
+                risk="INFO", phase="inventory", catalogue_id="DB-RDS-000",
+                description=f"Could not enumerate instances: {exc}",
+                output=str(exc), command="aws rds describe-db-instances")
+        return instances
+
+    def _list_clusters(self) -> list:
+        clusters = []
+        try:
+            paginator = self._rds.get_paginator("describe_db_clusters")
+            for page in paginator.paginate():
+                clusters.extend(page.get("DBClusters", []))
+        except Exception:
+            pass
+        return clusters
+
+    def _check_inventory(self, instances: list, clusters: list) -> None:
+        self.out.add_finding(
+            title=f"RDS inventory: {len(instances)} instances, {len(clusters)} clusters",
+            risk="INFO", phase="inventory", catalogue_id="DB-RDS-001",
+            description=(f"Discovered {len(instances)} DB instances and {len(clusters)} "
+                          f"Aurora clusters in region {self.region}."),
+            output="\n".join(i.get("DBInstanceIdentifier", "?") for i in instances[:20]),
+            command=f"aws rds describe-db-instances --region {self.region}")
+
+    # ── Per-instance checks ──
+
+    def _check_instance(self, inst: dict) -> None:
+        ident = inst.get("DBInstanceIdentifier", "?")
+        engine = inst.get("Engine", "?")
+        engine_ver = inst.get("EngineVersion", "?")
+
+        # 1. PubliclyAccessible
+        if inst.get("PubliclyAccessible"):
+            ep = (inst.get("Endpoint") or {}).get("Address", "?")
+            self.out.add_finding(
+                title=f"RDS instance {ident} is PubliclyAccessible",
+                risk="HIGH", phase="instance", catalogue_id="DB-RDS-020",
+                description=("DB endpoint is reachable from the public internet. "
+                              "Even with SG restrictions, this surface invites "
+                              "brute-force, version-exploit, and side-channel attacks "
+                              "against the engine."),
+                output=f"DB={ident} Engine={engine} Endpoint={ep}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 2. StorageEncrypted
+        if not inst.get("StorageEncrypted"):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: storage NOT encrypted at rest",
+                risk="HIGH", phase="instance", catalogue_id="DB-RDS-021",
+                description=("StorageEncrypted=false — snapshots and underlying "
+                              "disks are unencrypted. Encryption cannot be enabled "
+                              "in-place; instance must be recreated from an "
+                              "encrypted snapshot copy."),
+                output=f"DB={ident} StorageEncrypted=False",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 3. BackupRetentionPeriod
+        retention = inst.get("BackupRetentionPeriod", 0) or 0
+        if retention == 0:
+            self.out.add_finding(
+                title=f"RDS instance {ident}: automated backups DISABLED",
+                risk="HIGH", phase="instance", catalogue_id="DB-RDS-022",
+                description=("BackupRetentionPeriod=0 — automated backups are "
+                              "disabled. Recovery from ransom / accidental drop "
+                              "events is impossible without manual snapshots."),
+                output=f"DB={ident} BackupRetentionPeriod=0",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+        elif retention < 7:
+            self.out.add_finding(
+                title=f"RDS instance {ident}: BackupRetentionPeriod={retention}d (<7)",
+                risk="MEDIUM", phase="instance", catalogue_id="DB-RDS-023",
+                description=("BackupRetentionPeriod is set but below the 7-day "
+                              "minimum recommended for recovery from delayed-"
+                              "discovery incidents."),
+                output=f"DB={ident} BackupRetentionPeriod={retention}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 4. DeletionProtection
+        if not inst.get("DeletionProtection", False):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: deletion protection disabled",
+                risk="MEDIUM", phase="instance", catalogue_id="DB-RDS-024",
+                description=("Deletion protection prevents accidental DropTable / "
+                              "DeleteInstance via IAM. Enable for any production / "
+                              "regulated instance."),
+                output=f"DB={ident} DeletionProtection=False",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 5. IAMDatabaseAuthenticationEnabled (PG/MySQL only)
+        if engine.startswith(("mysql", "postgres", "mariadb", "aurora")) \
+                and not inst.get("IAMDatabaseAuthenticationEnabled"):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: IAM database authentication not enabled",
+                risk="LOW", phase="instance", catalogue_id="DB-RDS-025",
+                description=("IAMDatabaseAuthenticationEnabled=false. IAM auth "
+                              "lets you grant DB access via IAM roles instead of "
+                              "long-lived passwords, simplifying credential rotation."),
+                output=f"DB={ident} Engine={engine}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 6. PerformanceInsights + CloudWatch Logs export
+        if not inst.get("PerformanceInsightsEnabled"):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: Performance Insights disabled",
+                risk="INFO", phase="instance", catalogue_id="DB-RDS-026",
+                description=("Performance Insights enables retrospective analysis "
+                              "of query load — useful for diagnosing suspicious "
+                              "query patterns."),
+                output=f"DB={ident}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+        if not inst.get("EnabledCloudwatchLogsExports"):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: no CloudWatch log exports configured",
+                risk="MEDIUM", phase="instance", catalogue_id="DB-RDS-027",
+                description=("EnabledCloudwatchLogsExports is empty — DB logs are "
+                              "not shipped to CloudWatch. PCI DSS 10.x and HIPAA "
+                              "audit requirements typically require centralised "
+                              "log retention."),
+                output=f"DB={ident}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+        # 7. AutoMinorVersionUpgrade
+        if not inst.get("AutoMinorVersionUpgrade", True):
+            self.out.add_finding(
+                title=f"RDS instance {ident}: AutoMinorVersionUpgrade disabled",
+                risk="LOW", phase="instance", catalogue_id="DB-RDS-028",
+                description=("AutoMinorVersionUpgrade=false — minor patches that "
+                              "include CVE fixes will NOT auto-apply. Verify a "
+                              "monthly patch process is in place."),
+                output=f"DB={ident}",
+                command=f"aws rds describe-db-instances --db-instance-identifier {ident}")
+
+    # ── Per-cluster checks (Aurora) ──
+
+    def _check_cluster(self, cluster: dict) -> None:
+        ident = cluster.get("DBClusterIdentifier", "?")
+        if not cluster.get("StorageEncrypted"):
+            self.out.add_finding(
+                title=f"Aurora cluster {ident}: storage NOT encrypted at rest",
+                risk="HIGH", phase="cluster", catalogue_id="DB-RDS-040",
+                description=("Aurora cluster has StorageEncrypted=false. As with "
+                              "RDS instances, encryption cannot be enabled in-place."),
+                output=f"Cluster={ident}",
+                command=f"aws rds describe-db-clusters --db-cluster-identifier {ident}")
+        retention = cluster.get("BackupRetentionPeriod", 0) or 0
+        if retention < 7:
+            self.out.add_finding(
+                title=f"Aurora cluster {ident}: BackupRetentionPeriod={retention}d (<7)",
+                risk="MEDIUM", phase="cluster", catalogue_id="DB-RDS-041",
+                description="See DB-RDS-023.",
+                output=f"Cluster={ident} BackupRetentionPeriod={retention}",
+                command=f"aws rds describe-db-clusters --db-cluster-identifier {ident}")
+        if not cluster.get("DeletionProtection", False):
+            self.out.add_finding(
+                title=f"Aurora cluster {ident}: deletion protection disabled",
+                risk="MEDIUM", phase="cluster", catalogue_id="DB-RDS-042",
+                description="See DB-RDS-024.",
+                output=f"Cluster={ident} DeletionProtection=False",
+                command=f"aws rds describe-db-clusters --db-cluster-identifier {ident}")
+
+    # ── Snapshots check ──
+
+    def _check_snapshots(self) -> None:
+        try:
+            paginator = self._rds.get_paginator("describe_db_snapshots")
+            for page in paginator.paginate(SnapshotType="manual"):
+                for snap in page.get("DBSnapshots", []):
+                    if not snap.get("Encrypted"):
+                        self.out.add_finding(
+                            title=f"RDS snapshot {snap.get('DBSnapshotIdentifier')} NOT encrypted",
+                            risk="HIGH", phase="snapshots", catalogue_id="DB-RDS-050",
+                            description="Manual snapshot is unencrypted; if shared "
+                                        "or copied across accounts, the underlying "
+                                        "data is exposed.",
+                            output=str({k: snap.get(k) for k in
+                                         ("DBSnapshotIdentifier","Encrypted","Status")}),
+                            command="aws rds describe-db-snapshots --snapshot-type manual")
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._rds = None
+        self._cloudwatch = None
+
+
+# ---------------------------------------------------------------------------
 # Generic network / TLS phase (all database types)
 # ---------------------------------------------------------------------------
 def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
@@ -3975,6 +4786,39 @@ def run_audit(cfg: dict) -> int:
         else:
             _console.error("Memcached connection failed.")
 
+    elif db_type == "dynamodb":
+        # Fixes the 2026-06-11 review HIGH finding: DynamoDB was declared
+        # in argparse choices but had no auditor class. Now wired through
+        # boto3 against the AWS DynamoDB control plane.
+        auditor = DynamoDBAuditor(
+            aws_profile=ns.aws_profile, aws_region=ns.aws_region,
+            out=out, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor.close()
+        else:
+            _console.error("DynamoDB connect failed (check AWS credentials / region).")
+
+    elif db_type == "rds":
+        # 2026-06-11 review round 4: native AWS RDS control-plane audit.
+        # Complements the existing engine-specific auditors (MySQL/PG/...) —
+        # those handle the in-DB checks via direct connection; RDSAuditor
+        # handles the AWS account / parameter-group / snapshot surface.
+        auditor = RDSAuditor(
+            aws_profile=ns.aws_profile, aws_region=ns.aws_region,
+            out=out, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor._version
+            extra = auditor.run(db_version)
+            phases_run.extend(extra)
+            auditor.close()
+        else:
+            _console.error("RDS connect failed (check AWS credentials / region).")
+
     else:
         _console.error(f"Database type '{db_type}' not supported.")
         return 3
@@ -4036,7 +4880,9 @@ Examples:
     p.add_argument("--db-type",     metavar="TYPE",   help="Database type",
                    choices=["mysql","mariadb","postgresql","postgres","mssql","oracle",
                             "mongodb","redis","cassandra","elasticsearch","elastic","es",
-                            "couchdb","influxdb","neo4j","memcached","redshift","dynamodb"])
+                            "couchdb","influxdb","neo4j","memcached","redshift","dynamodb",
+                            # 2026-06-11 review round 4: native AWS RDS audit
+                            "rds"])
     p.add_argument("-U", "--username", metavar="USER", default="")
     p.add_argument("-P", "--password", metavar="PASS", default="")
     p.add_argument("--database",    metavar="DB",     default="",  help="Database/schema name")
