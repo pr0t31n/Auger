@@ -30,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 # ---------------------------------------------------------------------------
 # Crucible protocol tokens (same as Fracture/Siphon)
@@ -416,6 +416,32 @@ class AugerOutput:
             if key in self._seen_keys:
                 return
             self._seen_keys.add(key)
+            # §13b/§14i: persist the query result as an output file and a query
+            # transcript .log, then point the finding's output_file at both
+            # (run-dir-relative). Auger uses DB client libraries (no subprocess),
+            # so this is the DB-query analogue of the §14 tool .log.
+            if output or command:
+                try:
+                    _safe = re.sub(r'[^\w.-]', '_', title)[:60] or "finding"
+                    _stamp = re.sub(r'[^0-9]', '', ts)[:14] or "ts"
+                    _evdir = self.root / "evidence" / (re.sub(r'[^\w.-]', '_', str(self.db_type or "db")))
+                    _evdir.mkdir(parents=True, exist_ok=True)
+                    _res = _evdir / f"{_safe}_{_stamp}_result.txt"
+                    _res.write_text(output or "(no result rows)", encoding="utf-8")
+                    _log = _evdir / f"{_safe}_{_stamp}.log"
+                    _log.write_text(
+                        f"# Auger DB query evidence\n"
+                        f"# target:   {self.host}:{self.port} ({self.db_type})\n"
+                        f"# finding:  {title}\n"
+                        f"# risk:     {risk.upper()}\n"
+                        f"# datetime: {ts}\n"
+                        f"# query:\n{command or '(n/a)'}\n"
+                        f"# result_file: {_res.name}\n",
+                        encoding="utf-8")
+                    entry["output_file"] = ",".join(
+                        str(p.relative_to(self.root)) for p in (_res, _log))
+                except Exception:
+                    pass
             try:
                 existing = json.loads(self.findings_json.read_text(encoding="utf-8"))
                 if not isinstance(existing, list):
