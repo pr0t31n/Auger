@@ -30,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 # ---------------------------------------------------------------------------
 # Crucible protocol tokens (same as Fracture/Siphon)
@@ -40,6 +40,7 @@ _CP_LOG    = "__CRUCIBLE_LOG__:"
 _CP_ERR    = "__CRUCIBLE_ERR__:"
 _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
 _CP_STATUS = "__CRUCIBLE_STATUS__:"
+_CP_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
 
 # ---------------------------------------------------------------------------
 # ANSI colours (disabled under Crucible)
@@ -265,6 +266,18 @@ class AugerConsole:
                 r = Style.RESET_ALL if _HAS_COLOR else ""
                 print(f"{Fore.MAGENTA if _HAS_COLOR else ''}[{label or phase}]{r} {step}{pct}")
 
+    def action_item(self, entry: dict) -> None:
+        with self._lock:
+            if self._managed:
+                sys.stdout.write(_CP_ACTION + json.dumps(entry) + "\n")
+                sys.stdout.flush()
+            else:
+                tool = entry.get("recommended_tool", "unknown")
+                title = entry.get("title", "")
+                target = entry.get("target", "")
+                r = Style.RESET_ALL if _HAS_COLOR else ""
+                print(f"{Fore.YELLOW if _HAS_COLOR else ''}[ACTION → {tool}]{r} {title}  ({target})")
+
 
 _console = AugerConsole()
 
@@ -284,6 +297,7 @@ FINDINGS_CSV_FIELDS = [
 class AugerOutput:
     _findings_lock = threading.Lock()
     _log_lock      = threading.Lock()
+    _action_items_lock = threading.Lock()
 
     def __init__(self, project_name: str, db_type: str, host: str, port: int) -> None:
         self.project_name  = project_name
@@ -299,6 +313,8 @@ class AugerOutput:
         self.log_file       = self.root / "scan.log"
         self.error_log      = self.root / "errors.log"
         self._seen_keys: set = set()
+        self._action_items: list = []
+        self._ai_seen: set = set()
         self._setup()
 
     def _setup(self) -> None:
@@ -328,6 +344,10 @@ class AugerOutput:
                 f"  Project : {self.project_name}\n"
                 f"  Created : {self._ts()}\n"
                 f"{'='*70}\n\n", encoding="utf-8")
+        # Action items
+        self._ai_path = self.root / "action_items.json"
+        if not self._ai_path.exists():
+            self._ai_path.write_text("[]", encoding="utf-8")
 
     def _write_csv_header(self) -> None:
         with self.findings_csv.open("w", newline="", encoding="utf-8") as f:
@@ -461,6 +481,44 @@ class AugerOutput:
             f"  [{risk.upper()}] {title}{'  [needs-validation]' if validation_required else ''}",
             "SUCCESS" if risk in ("CRITICAL", "HIGH") else "WARNING"
         )
+
+    def log_action_item(self, *, type: str, recommended_tool: str,
+                        target: str, ip: str, port: int, title: str,
+                        description: str, hostname: str = "",
+                        source_finding: str = "", priority: str = "MEDIUM",
+                        scope: str = "database", metadata: dict = None):
+        import uuid as _uuid
+        key = (recommended_tool.lower(), target.lower(), title.strip().lower())
+        with self._action_items_lock:
+            if key in self._ai_seen:
+                return
+            self._ai_seen.add(key)
+            entry = {
+                "id":               str(_uuid.uuid4()),
+                "type":             type,
+                "recommended_tool": recommended_tool,
+                "target":           target,
+                "ip":               ip,
+                "port":             port,
+                "hostname":         hostname or ip,
+                "title":            title,
+                "description":      description,
+                "source_finding":   source_finding,
+                "priority":         priority.upper(),
+                "scope":            scope,
+                "status":           "pending",
+                "datetime":         self._ts(),
+                "metadata":         metadata or {},
+            }
+            _console.action_item(entry)
+            self._action_items.append(entry)
+            try:
+                tmp = self._ai_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self._action_items, indent=2, ensure_ascii=False),
+                               encoding="utf-8")
+                os.replace(str(tmp), str(self._ai_path))
+            except Exception:
+                pass
 
     def write_summary(self, db_version: str, db_type: str,
                       auth_success: bool, phases_run: list) -> None:
@@ -717,6 +775,17 @@ class MySQLAuditor:
                 output=f"VERSION(): {ver}", db_version=ver,
                 command="SELECT VERSION()"
             )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="ExploitDB",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title=f"Exploit Verification — EOL MySQL/MariaDB {ver}",
+                description=f"End-of-life database version {ver} — search ExploitDB for known exploits targeting this release.",
+                source_finding=f"End-of-Life MySQL/MariaDB Version: {ver}",
+                priority="CRITICAL",
+                metadata={"db_type": db_type, "db_version": ver}
+            )
         # CVE check — 2026-06-11 review: was using bare startswith() which
         # over-matched patched mid-minor releases. Now compares against
         # cve["fixed_in"] if catalogue entry has it (semantic version compare),
@@ -755,6 +824,17 @@ class MySQLAuditor:
                 output=f"Version: {ver}  CVE: {cve['cve']}  CVSS: {cve['cvss']}  Confidence: {_confidence}",
                 cves=cve["cve"], db_version=ver,
                 command="SELECT VERSION()"
+            )
+            self.out.log_action_item(
+                type="exploit",
+                recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title=f"Exploit Verification — {cve['cve']}",
+                description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects MySQL {ver}. Verify exploitability.",
+                source_finding=f"Known CVE in MySQL Version: {cve['cve']}",
+                priority="HIGH",
+                metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver}
             )
         return ver
 
@@ -819,6 +899,17 @@ class MySQLAuditor:
                 output=str(rows),
                 command="SELECT user,host FROM mysql.user WHERE user='root' AND host NOT IN ('localhost','127.0.0.1','::1')",
                 db_version=self._version
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — MySQL Root Remote Access",
+                description="Root account has remote host entries. Verify whether remote root access is intentional and test for weak credentials.",
+                source_finding="MySQL: Root Account Accessible Remotely",
+                priority="CRITICAL",
+                metadata={"db_type": self.out.db_type}
             )
 
     def check_wildcard_hosts(self):
@@ -1090,6 +1181,17 @@ class MySQLAuditor:
                     command=f"mysql -h {self.host} -P {self.port} -u {user} -p{pwd}",
                     db_version=self._version
                 )
+                self.out.log_action_item(
+                    type="vulnerability",
+                    recommended_tool="Manual Verification",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title=f"Manual Verification Required — Default Credentials ({self.out.db_type})",
+                    description=f"Default credentials confirmed on {self.out.db_type}. Assess data access and lateral movement potential.",
+                    source_finding="Default Credentials in Use",
+                    priority="CRITICAL",
+                    metadata={"db_type": self.out.db_type, "user": user}
+                )
                 break
             except Exception:
                 pass
@@ -1205,6 +1307,17 @@ class PostgreSQLAuditor:
                     output=f"Version: {ver_num}  CVE: {cve['cve']}  CVSS: {cve['cvss']}",
                     cves=cve["cve"], db_version=ver_num, command="SELECT version()"
                 )
+                self.out.log_action_item(
+                    type="exploit",
+                    recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title=f"Exploit Verification — {cve['cve']}",
+                    description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects PostgreSQL {ver_num}. Verify exploitability.",
+                    source_finding=f"Known CVE in PostgreSQL Version: {cve['cve']}",
+                    priority="HIGH",
+                    metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver_num}
+                )
         return ver_num
 
     def _setting(self, name: str) -> str:
@@ -1248,6 +1361,18 @@ class PostgreSQLAuditor:
                     validation_required=True,
                     validation_notes="Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
                     db_version=self._version
+                )
+                self.out.log_action_item(
+                    type="vulnerability",
+                    recommended_tool="Manual Verification",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title="Manual Verification Required — PostgreSQL Superuser Remote Access",
+                    description="Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
+                    source_finding="PostgreSQL: Superuser Account Accessible Remotely",
+                    priority="HIGH",
+                    metadata={"validation_notes": "Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
+                              "db_type": self.out.db_type}
                 )
 
     def check_public_schema_perms(self):
@@ -1548,6 +1673,17 @@ class MSSQLAuditor:
                 output="xp_cmdshell value_in_use = 1",
                 command="SELECT value_in_use FROM sys.configurations WHERE name='xp_cmdshell'",
                 db_version=self._version
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Metasploit",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Exploit Verification — MSSQL xp_cmdshell RCE",
+                description="xp_cmdshell is enabled allowing OS command execution. Test with Metasploit mssql_payload or manual EXEC xp_cmdshell.",
+                source_finding="MSSQL: xp_cmdshell Enabled",
+                priority="CRITICAL",
+                metadata={"db_type": "MSSQL", "module": "exploit/windows/mssql/mssql_payload"}
             )
 
     def check_sa_account(self):
@@ -1917,6 +2053,17 @@ class MongoDBauditor:
                         output=f"Version: {ver}", db_version=ver,
                         command="db.serverStatus()"
                     )
+                    self.out.log_action_item(
+                        type="exploit",
+                        recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                        target=f"{self.out.host}:{self.out.port}",
+                        ip=self.out.host, port=self.out.port,
+                        title=f"Exploit Verification — {cve['cve']}",
+                        description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects MongoDB {ver}. Verify exploitability.",
+                        source_finding=f"Known CVE in MongoDB Version: {cve['cve']}",
+                        priority="HIGH",
+                        metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver}
+                    )
             return ver
         except Exception:
             return ""
@@ -1938,6 +2085,17 @@ class MongoDBauditor:
                 output=f"Connected to {self.host}:{self.port} without credentials",
                 command=f"mongo --host {self.host} --port {self.port}",
                 db_version=self._version
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — MongoDB No Authentication",
+                description="MongoDB accepts unauthenticated connections. Enumerate databases and assess data exposure.",
+                source_finding="MongoDB: Authentication Disabled",
+                priority="CRITICAL",
+                metadata={"db_type": "MongoDB"}
             )
             test.close()
         except Exception:
@@ -2172,6 +2330,17 @@ class RedisAuditor:
                         description=cve["desc"], cves=cve["cve"],
                         output=f"Version: {ver}", db_version=ver
                     )
+                    self.out.log_action_item(
+                        type="exploit",
+                        recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                        target=f"{self.out.host}:{self.out.port}",
+                        ip=self.out.host, port=self.out.port,
+                        title=f"Exploit Verification — {cve['cve']}",
+                        description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects Redis {ver}. Verify exploitability.",
+                        source_finding=f"Known CVE in Redis Version: {cve['cve']}",
+                        priority="HIGH",
+                        metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver}
+                    )
             return ver
         except Exception:
             return ""
@@ -2194,6 +2363,17 @@ class RedisAuditor:
                 output=f"Connected to {self.host}:{self.port} without credentials",
                 command=f"redis-cli -h {self.host} -p {self.port} ping",
                 db_version=self._version
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — Redis No Authentication",
+                description="Redis accepts unauthenticated connections. Test for data exfiltration and RCE via CONFIG SET / MODULE LOAD.",
+                source_finding="Redis: No Authentication Configured (requirepass Not Set)",
+                priority="CRITICAL",
+                metadata={"db_type": "Redis"}
             )
         except Exception:
             pass
@@ -2408,6 +2588,17 @@ class CassandraAuditor:
                     description=cve["desc"], cves=cve["cve"],
                     output=f"Version: {ver}", db_version=ver
                 )
+                self.out.log_action_item(
+                    type="exploit",
+                    recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title=f"Exploit Verification — {cve['cve']}",
+                    description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects Cassandra {ver}. Verify exploitability.",
+                    source_finding=f"Known CVE in Cassandra Version: {cve['cve']}",
+                    priority="HIGH",
+                    metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver}
+                )
         return ver
 
     def check_auth(self):
@@ -2577,6 +2768,17 @@ class ElasticsearchAuditor:
                     description=cve["desc"], cves=cve["cve"],
                     output=f"Version: {ver}", db_version=ver
                 )
+                self.out.log_action_item(
+                    type="exploit",
+                    recommended_tool="ExploitDB" if "exploit" in cve.get("desc", "").lower() else "Metasploit",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title=f"Exploit Verification — {cve['cve']}",
+                    description=f"Known CVE {cve['cve']} (CVSS {cve.get('cvss', 'N/A')}) affects Elasticsearch {ver}. Verify exploitability.",
+                    source_finding=f"Known CVE in Elasticsearch Version: {cve['cve']}",
+                    priority="HIGH",
+                    metadata={"cve": cve["cve"], "cvss": cve.get("cvss"), "db_version": ver}
+                )
         return ver
 
     def check_no_auth(self):
@@ -2590,6 +2792,17 @@ class ElasticsearchAuditor:
                 output=json.dumps(result)[:500],
                 command=f"curl -s http://{self.host}:{self.port}/_cluster/health",
                 db_version=self._version
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — Elasticsearch No Authentication",
+                description="Elasticsearch cluster accessible without authentication. Enumerate indices and assess data exposure.",
+                source_finding="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                priority="CRITICAL",
+                metadata={"db_type": "Elasticsearch"}
             )
 
     def check_cluster_info_exposed(self):
@@ -2856,6 +3069,18 @@ class OracleAuditor:
                 command="SELECT STATUS FROM V$OPTION WHERE PARAMETER='Oracle Label Security'",
                 validation_required=True,
                 validation_notes="OLS may be intentionally omitted; verify with DBA."
+            )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — Oracle Label Security Not Enabled",
+                description="OLS may be intentionally omitted; verify with DBA.",
+                source_finding="Oracle Label Security (OLS) Not Enabled",
+                priority="LOW",
+                metadata={"validation_notes": "OLS may be intentionally omitted; verify with DBA.",
+                          "db_type": self.out.db_type}
             )
 
     def run(self, db_version: str) -> list:
@@ -3207,6 +3432,18 @@ class Neo4jAuditor:
                 validation_required=True,
                 validation_notes="Confirm cluster ports 5000/6000/7000 are firewalled."
             )
+            self.out.log_action_item(
+                type="vulnerability",
+                recommended_tool="Manual Verification",
+                target=f"{self.out.host}:{self.out.port}",
+                ip=self.out.host, port=self.out.port,
+                title="Manual Verification Required — Neo4j Cluster Firewall Isolation",
+                description="Confirm cluster ports 5000/6000/7000 are firewalled.",
+                source_finding="Neo4j Cluster Mode Detected — Verify Firewall Isolation",
+                priority="MEDIUM",
+                metadata={"validation_notes": "Confirm cluster ports 5000/6000/7000 are firewalled.",
+                          "db_type": self.out.db_type}
+            )
 
     def check_default_creds(self):
         neo4j = _try_import("neo4j")
@@ -3386,6 +3623,18 @@ class MemcachedAuditor:
                     validation_required=True,
                     validation_notes="Review key names for PII/session tokens/API keys.",
                     command=f"echo 'stats cachedump {slab_ids[0]} 3' | nc {self.host} {self.port}"
+                )
+                self.out.log_action_item(
+                    type="vulnerability",
+                    recommended_tool="Manual Verification",
+                    target=f"{self.out.host}:{self.out.port}",
+                    ip=self.out.host, port=self.out.port,
+                    title="Manual Verification Required — Memcached Data Key Enumeration",
+                    description="Review key names for PII/session tokens/API keys.",
+                    source_finding="Memcached: Cached Data Keys Enumerable Without Authentication",
+                    priority="HIGH",
+                    metadata={"validation_notes": "Review key names for PII/session tokens/API keys.",
+                              "db_type": self.out.db_type}
                 )
 
     def run(self, db_version: str) -> list:
