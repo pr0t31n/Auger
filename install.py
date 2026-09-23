@@ -3,6 +3,19 @@
 import subprocess, sys, os, shutil
 from pathlib import Path
 
+
+def _pip_installed(pkg_spec):
+    """Return True if a pip package is already importable."""
+    import importlib.util
+    name = pkg_spec.split(">=")[0].split("==")[0].split("[")[0].split("<")[0].strip()
+    _IMPORT_MAP = {
+        "psycopg2-binary": "psycopg2", "cassandra-driver": "cassandra",
+        "influxdb-client": "influxdb_client", "PyMySQL": "pymysql",
+        "Pillow": "PIL", "pyyaml": "yaml",
+    }
+    mod = _IMPORT_MAP.get(name, name.replace("-", "_"))
+    return importlib.util.find_spec(mod) is not None
+
 TOOL_NAME   = "Auger"
 MIN_PYTHON  = (3, 10)
 INSTALL_DIR = Path("/opt/pr0t31n/Auger")
@@ -98,8 +111,23 @@ def install_system_deps():
 def install_pip_deps():
     print("\n[pip] Installing Python dependencies...")
     req = Path(__file__).parent / "requirements.txt"
-    _run([sys.executable, "-m", "pip", "install",
-          "--break-system-packages", "-r", str(req)])
+    if not req.exists():
+        print("  ! requirements.txt not found — skipping pip install")
+        return
+    with open(req) as f:
+        pkgs = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    _to_install = []
+    for pkg in pkgs:
+        if _pip_installed(pkg):
+            print(f"  ✓ {pkg} already installed")
+        else:
+            _to_install.append(pkg)
+    if _to_install:
+        print(f"  Installing {len(_to_install)} package(s)…")
+        _run([sys.executable, "-m", "pip", "install",
+              "--break-system-packages"] + _to_install)
+    else:
+        print("  All pip packages already installed.")
 
 # ─── catalogue dir ──────────────────────────────────────────────────────────
 
