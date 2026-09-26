@@ -30,7 +30,7 @@ from pathlib import Path
 from urllib.parse import urlparse, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.9.2"
+VERSION = Path(__file__).resolve().parent.joinpath("VERSION").read_text().strip()
 
 # ---------------------------------------------------------------------------
 # Crucible protocol tokens (same as Fracture/Siphon)
