@@ -42,6 +42,14 @@ _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
 _CP_STATUS = "__CRUCIBLE_STATUS__:"
 _CP_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
 
+try:
+    if "/opt/pr0t31n/shared" not in sys.path:
+        sys.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_pause as _pp
+except ImportError:
+    _pp = None
+_PAUSE = None
+
 # ---------------------------------------------------------------------------
 # ANSI colours (disabled under Crucible)
 # ---------------------------------------------------------------------------
@@ -4835,6 +4843,15 @@ def run_audit(cfg: dict) -> int:
         target=f"{db_type}://{host}:{port}",
     )
 
+    global _PAUSE
+    if _pp is not None:
+        _PAUSE = _pp.PauseManager(str(out.root), "auger")
+        _PAUSE.start_watcher(grace_period=60)
+        _resumed = os.environ.get("CRUCIBLE_RESUME") == "1"
+        _PAUSE.log_run_type(resumed=_resumed)
+        if _resumed:
+            _PAUSE.cleanup_incomplete()
+
     # Optional: update CVEs from NVD before audit
     if update_cves:
         catalogue_dir = Path(__file__).parent / "catalogue"
@@ -4859,6 +4876,8 @@ def run_audit(cfg: dict) -> int:
 
     # Network / TLS checks
     run_network_phase(host, port, out)
+
+    if _PAUSE and _PAUSE.check_and_pause(): sys.exit(_pp.EXIT_PAUSED)
 
     _console.status("connectivity", label="Connectivity", status="complete")
 
@@ -5123,6 +5142,9 @@ def run_audit(cfg: dict) -> int:
     if needs_validation:
         _console.log(f"Findings requiring manual validation: {needs_validation}", "WARNING")
     _console.log(f"Output: {out.root}", "INFO")
+
+    if _PAUSE:
+        _PAUSE.write_stop_reason("completed", "all_phases_done")
 
     _console.status("complete", label="Audit Complete", status="complete",
                     progress=len(findings), total=len(findings))
