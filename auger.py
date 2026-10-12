@@ -247,7 +247,8 @@ class AugerConsole:
                 c = _cols.get(level, "") if _HAS_COLOR else ""
                 tag = _tags.get(level, "[*]")
                 reset = Style.RESET_ALL if _HAS_COLOR else ""
-                print(f"{c}{tag}{reset} {message}")
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"{c}[{ts}] {tag}{reset} {message}")
 
     def error(self, message: str, detail: str = "") -> None:
         with self._lock:
@@ -258,7 +259,8 @@ class AugerConsole:
                 sys.stderr.flush()
             else:
                 r = Style.RESET_ALL if _HAS_COLOR else ""
-                print(f"{Fore.RED if _HAS_COLOR else ''}[!]{r} {message}", file=sys.stderr)
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"{Fore.RED if _HAS_COLOR else ''}[{ts}] [!]{r} {message}", file=sys.stderr)
 
     def status(self, phase: str, label: str = "", status: str = "running",
                step: str = "", progress: int = 0, total: int = 0) -> None:
@@ -272,7 +274,8 @@ class AugerConsole:
             else:
                 pct = f" ({progress}/{total})" if total else ""
                 r = Style.RESET_ALL if _HAS_COLOR else ""
-                print(f"{Fore.MAGENTA if _HAS_COLOR else ''}[{label or phase}]{r} {step}{pct}")
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"{Fore.MAGENTA if _HAS_COLOR else ''}[{ts}] [{label or phase}]{r} {step}{pct}")
 
     def action_item(self, entry: dict) -> None:
         with self._lock:
@@ -284,10 +287,50 @@ class AugerConsole:
                 title = entry.get("title", "")
                 target = entry.get("target", "")
                 r = Style.RESET_ALL if _HAS_COLOR else ""
-                print(f"{Fore.YELLOW if _HAS_COLOR else ''}[ACTION → {tool}]{r} {title}  ({target})")
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"{Fore.YELLOW if _HAS_COLOR else ''}[{ts}] [ACTION → {tool}]{r} {title}  ({target})")
 
 
 _console = AugerConsole()
+
+# Human-readable labels for check methods — turns "check_ssl_config" into
+# "SSL configuration" for console output.
+_CHECK_LABELS: dict = {}
+
+def _check_label(method_name: str) -> str:
+    if method_name in _CHECK_LABELS:
+        return _CHECK_LABELS[method_name]
+    label = method_name.replace("check_", "").replace("_check_", "")
+    label = label.replace("_", " ").strip()
+    return label
+
+
+def _run_checks(db_label: str, host: str, port: int, checks: list,
+                out: "AugerOutput") -> list:
+    """Run a list of (method, phase) pairs with verbose START/END logging."""
+    phases: list = []
+    total = len(checks)
+    for idx, (method, phase) in enumerate(checks, 1):
+        label = _check_label(method.__name__)
+        _console.status(db_label.lower(), label=f"{db_label} {phase}",
+                        step=method.__name__, status="running",
+                        progress=idx, total=total)
+        _console.log(f"[{phase}] Checking {label} on {host}:{port}...", "INFO")
+        out.log_step(f"START {db_label} {method.__name__} ({phase})")
+        try:
+            result = method()
+            if result is not None and isinstance(result, str) and result:
+                _console.log(f"[{phase}] {label} — {result}", "SUCCESS")
+            else:
+                _console.log(f"[{phase}] {label} — done", "INFO")
+        except Exception as e:
+            _console.log(f"[{phase}] {label} — error: {e}", "ERROR")
+            out.log_error(method.__name__, str(e))
+        out.log_step(f"END   {db_label} {method.__name__}")
+        if phase not in phases:
+            phases.append(phase)
+    return phases
+
 
 # ---------------------------------------------------------------------------
 # Output / finding manager  (Fracture-compatible schema)
@@ -1205,8 +1248,7 @@ class MySQLAuditor:
                 pass
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        phases = _run_checks("MySQL", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_default_creds, "auth"),
             (self.check_anonymous_users, "accounts"),
@@ -1217,23 +1259,15 @@ class MySQLAuditor:
             (self.check_wildcard_hosts, "accounts"),
             (self.check_password_policy, "config"),
             (self.check_general_log, "logging"),
-            (self.check_audit_log_plugin, "logging"),     # 2026-06-11 review
+            (self.check_audit_log_plugin, "logging"),
             (self.check_ssl_config, "network"),
-            (self.check_encryption_at_rest, "encryption"),  # 2026-06-11 review
+            (self.check_encryption_at_rest, "encryption"),
             (self.check_symlinks, "config"),
             (self.check_bind_address, "config"),
             (self.check_user_privileges, "permissions"),
             (self.check_sql_mode, "config"),
             (self.check_error_log, "logging"),
-        ]:
-            _console.status("mysql", label=f"MySQL {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
+        ], self.out)
         return phases
 
 
@@ -1555,8 +1589,7 @@ class PostgreSQLAuditor:
                 db_version=self._version)
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("PostgreSQL", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_default_creds, "auth"),
             (self.check_ssl, "network"),
@@ -1565,22 +1598,13 @@ class PostgreSQLAuditor:
             (self.check_public_schema_perms, "permissions"),
             (self.check_row_security, "permissions"),
             (self.check_logging, "logging"),
-            (self.check_pg_audit_extension, "logging"),      # 2026-06-11 review
+            (self.check_pg_audit_extension, "logging"),
             (self.check_extensions, "config"),
             (self.check_copy_program, "config"),
             (self.check_listen_addresses, "config"),
-            (self.check_pgcrypto_extension, "encryption"),    # 2026-06-11 review
-            (self.check_data_directory_perms, "config"),       # 2026-06-11 review
-        ]:
-            _console.status("postgresql", label=f"PostgreSQL {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+            (self.check_pgcrypto_extension, "encryption"),
+            (self.check_data_directory_perms, "config"),
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -1970,8 +1994,7 @@ class MSSQLAuditor:
                         db_version=self._version)
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        phases = _run_checks("MSSQL", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_default_creds, "auth"),
             (self.check_xp_cmdshell, "config"),
@@ -1982,19 +2005,11 @@ class MSSQLAuditor:
             (self.check_builtin_admins, "permissions"),
             (self.check_password_policy, "config"),
             (self.check_tde, "crypto"),
-            (self.check_always_encrypted, "crypto"),    # 2026-06-11 review
-            (self.check_audit_destination, "logging"),  # 2026-06-11 review
+            (self.check_always_encrypted, "crypto"),
+            (self.check_audit_destination, "logging"),
             (self.check_ad_hoc_queries, "config"),
             (self.check_database_mail, "config"),
-        ]:
-            _console.status("mssql", label=f"MSSQL {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
+        ], self.out)
         return phases
 
 
@@ -2261,8 +2276,7 @@ class MongoDBauditor:
                 pass
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("MongoDB", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_auth_enabled, "auth"),
             (self.check_default_creds, "auth"),
@@ -2270,18 +2284,9 @@ class MongoDBauditor:
             (self.check_tls, "network"),
             (self.check_users, "accounts"),
             (self.check_bind_ip, "config"),
-            (self.check_encryption_at_rest, "encryption"),  # 2026-06-11 review
-            (self.check_oplog_exposure, "permissions"),      # 2026-06-11 review
-        ]:
-            _console.status("mongodb", label=f"MongoDB {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+            (self.check_encryption_at_rest, "encryption"),
+            (self.check_oplog_exposure, "permissions"),
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -2509,8 +2514,7 @@ class RedisAuditor:
                 pass
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Redis", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_no_auth, "auth"),
             (self.check_default_creds, "auth"),
@@ -2519,16 +2523,7 @@ class RedisAuditor:
             (self.check_bind, "config"),
             (self.check_tls, "network"),
             (self.check_acl, "auth"),
-        ]:
-            _console.status("redis", label=f"Redis {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -2695,23 +2690,13 @@ class CassandraAuditor:
             )
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Cassandra", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_auth, "auth"),
             (self.check_default_creds, "auth"),
             (self.check_tls, "network"),
             (self.check_superusers, "accounts"),
-        ]:
-            _console.status("cassandra", label=f"Cassandra {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -2881,24 +2866,14 @@ class ElasticsearchAuditor:
                 pass
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Elasticsearch", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_no_auth, "auth"),
             (self.check_default_creds, "auth"),
             (self.check_cluster_info_exposed, "config"),
             (self.check_indices, "permissions"),
             (self.check_security_settings, "config"),
-        ]:
-            _console.status("elasticsearch", label=f"ES {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -3092,8 +3067,7 @@ class OracleAuditor:
             )
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Oracle", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_default_passwords, "auth"),
             (self.check_public_grants, "permissions"),
@@ -3103,16 +3077,7 @@ class OracleAuditor:
             (self.check_excessive_privs, "permissions"),
             (self.check_legacy_hashes, "auth"),
             (self.check_ols, "config"),
-        ]:
-            _console.status("oracle", label=f"Oracle {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -3216,23 +3181,13 @@ class CouchDBAuditor:
                 break
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("CouchDB", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_admin_party, "auth"),
             (self.check_no_auth, "auth"),
             (self.check_cluster_config_exposed, "config"),
             (self.check_default_creds, "auth"),
-        ]:
-            _console.status("couchdb", label=f"CouchDB {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -3343,23 +3298,13 @@ class InfluxDBAuditor:
                 pass
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("InfluxDB", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_setup_incomplete, "auth"),
             (self.check_no_auth, "auth"),
             (self.check_buckets_exposed, "permissions"),
             (self.check_default_creds, "auth"),
-        ]:
-            _console.status("influxdb", label=f"InfluxDB {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
 
 # ---------------------------------------------------------------------------
@@ -3497,22 +3442,12 @@ class Neo4jAuditor:
                 )
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Neo4j", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_config_exposed, "config"),
             (self.check_default_creds, "auth"),
             (self.check_procedures, "permissions"),
-        ]:
-            _console.status("neo4j", label=f"Neo4j {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
     def close(self):
         if self._driver:
@@ -3646,22 +3581,12 @@ class MemcachedAuditor:
                 )
 
     def run(self, db_version: str) -> list:
-        phases = []
-        for method, phase in [
+        return _run_checks("Memcached", self.host, self.port, [
             (self.check_version, "version"),
             (self.check_no_sasl_auth, "auth"),
             (self.check_stats_exposure, "config"),
             (self.check_data_access, "data"),
-        ]:
-            _console.status("memcached", label=f"Memcached {phase}", step=method.__name__,
-                            status="running")
-            try:
-                method()
-            except Exception as e:
-                self.out.log_error(method.__name__, str(e))
-            if phase not in phases:
-                phases.append(phase)
-        return phases
+        ], self.out)
 
     def close(self):
         if self._sock:
@@ -3719,20 +3644,14 @@ class DynamoDBAuditor:
             return False
 
     def run(self, db_version: str) -> list:
-        phases: list = []
-        self._check_region_tables()
-        phases.append("inventory")
-        self._check_encryption_at_rest()
-        phases.append("encryption")
-        self._check_pitr()
-        phases.append("backup")
-        self._check_streams()
-        phases.append("streams")
-        self._check_deletion_protection()
-        phases.append("protection")
-        self._check_resource_policies()
-        phases.append("iam")
-        return phases
+        return _run_checks("DynamoDB", self.region, 0, [
+            (self._check_region_tables, "inventory"),
+            (self._check_encryption_at_rest, "encryption"),
+            (self._check_pitr, "backup"),
+            (self._check_streams, "streams"),
+            (self._check_deletion_protection, "protection"),
+            (self._check_resource_policies, "iam"),
+        ], self.out)
 
     def _list_tables(self) -> list[str]:
         try:
@@ -3907,18 +3826,27 @@ class RDSAuditor:
             return False
 
     def run(self, db_version: str) -> list:
-        phases: list = []
+        _console.log(f"[inventory] Enumerating RDS instances and clusters in {self.region}...", "INFO")
         instances = self._list_instances()
         clusters  = self._list_clusters()
+        _console.log(f"[inventory] Found {len(instances)} instances, {len(clusters)} clusters", "SUCCESS")
         self._check_inventory(instances, clusters)
-        phases.append("inventory")
-        for inst in instances:
+        phases = ["inventory"]
+        for idx, inst in enumerate(instances, 1):
+            iid = inst.get("DBInstanceIdentifier", "?")
+            _console.log(f"[instance] Auditing instance {idx}/{len(instances)}: {iid}...", "INFO")
             self._check_instance(inst)
+            _console.log(f"[instance] {iid} — done", "INFO")
         phases.append("instance")
-        for cluster in clusters:
+        for idx, cluster in enumerate(clusters, 1):
+            cid = cluster.get("DBClusterIdentifier", "?")
+            _console.log(f"[cluster] Auditing cluster {idx}/{len(clusters)}: {cid}...", "INFO")
             self._check_cluster(cluster)
+            _console.log(f"[cluster] {cid} — done", "INFO")
         phases.append("cluster")
+        _console.log("[snapshots] Checking for publicly accessible snapshots...", "INFO")
         self._check_snapshots()
+        _console.log("[snapshots] Snapshot audit — done", "INFO")
         phases.append("snapshots")
         return phases
 
