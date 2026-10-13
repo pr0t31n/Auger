@@ -34,7 +34,7 @@ def _has(binary):
 
 BREW_PKGS    = ["libpq", "openssl", "freetds"]
 APT_PKGS     = ["libpq-dev", "libssl-dev", "freetds-dev", "freetds-bin",
-                 "unixodbc-dev", "python3-dev", "build-essential"]
+                 "unixodbc-dev", "python3-dev", "build-essential", "libev-dev"]
 CHOCO_PKGS   = []                        # Windows: most things via pip
 
 def _real_user() -> str:
