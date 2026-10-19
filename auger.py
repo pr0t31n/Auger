@@ -4625,7 +4625,7 @@ def _update_cves_from_nvd(catalogue_dir: Path, db_type: str) -> None:
 # Settings file builder
 # ---------------------------------------------------------------------------
 def _build_settings_from_args(args) -> dict:
-    return {
+    cfg = {
         "engagement": {
             "consultant": "", "client_name": "", "client_short": "",
             "consultant_email": "", "start_date": "", "end_date": ""
@@ -4653,6 +4653,9 @@ def _build_settings_from_args(args) -> dict:
             "update_cves": getattr(args, "update_cves", False),
         }
     }
+    if getattr(args, "db_file", None):
+        cfg["db_file"] = args.db_file
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -5080,6 +5083,560 @@ def run_audit(cfg: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Database file analysis (--db-file mode)
+# ---------------------------------------------------------------------------
+
+_FILE_EXT_MAP = {
+    ".db": "sqlite", ".sqlite": "sqlite", ".sqlite3": "sqlite",
+    ".sqlitedb": "sqlite", ".s3db": "sqlite",
+    ".sql": "sqldump", ".dump": "sqldump",
+    ".rdb": "redis_rdb",
+}
+
+_SQLITE_MAGIC = b"SQLite format 3"
+_REDIS_MAGIC  = b"REDIS"
+
+_SENS_COL_RE = re.compile(
+    r"(password|passwd|pwd|secret|token|api_key|apikey|access_key|"
+    r"private_key|ssn|social_security|credit_card|card_number|cvv|"
+    r"auth_token|session_token|refresh_token|encryption_key|"
+    r"pin|tax_id|bank_account|routing_number|dob|date_of_birth|"
+    r"medical_record|diagnosis|prescription)", re.IGNORECASE
+)
+
+_SENS_DATA_PATS = {
+    "email":         re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}"),
+    "ssn":           re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "credit_card":   re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13})\b"),
+    "api_key":       re.compile(r"(?:AKIA[0-9A-Z]{16}|sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36})"),
+    "private_key":   re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),
+    "password_hash": re.compile(r"\$(?:2[aby]|5|6|argon2[id]?)\$[./a-zA-Z0-9]+"),
+}
+
+_SQL_CRED_RES = [
+    re.compile(r"(?:CREATE\s+USER|CREATE\s+ROLE)\s+['\"]?(\S+?)['\"]?\s+.*?(?:PASSWORD|IDENTIFIED\s+BY)\s+['\"]([^'\"]+)['\"]", re.IGNORECASE | re.DOTALL),
+    re.compile(r"GRANT\s+.*?\s+TO\s+['\"]?(\S+?)['\"]?\s+.*?(?:PASSWORD|IDENTIFIED\s+BY)\s+['\"]([^'\"]+)['\"]", re.IGNORECASE | re.DOTALL),
+    re.compile(r"ALTER\s+(?:USER|ROLE)\s+['\"]?(\S+?)['\"]?\s+.*?(?:PASSWORD|IDENTIFIED\s+BY)\s+['\"]([^'\"]+)['\"]", re.IGNORECASE | re.DOTALL),
+]
+_SQL_GRANT_ALL_RE = re.compile(r"GRANT\s+ALL\s+(?:PRIVILEGES\s+)?ON\s+[*.]", re.IGNORECASE)
+_SQL_SENS_INSERT_RE = re.compile(
+    r"INSERT\s+INTO\s+[`'\"]?(\w+)[`'\"]?\s*\(([^)]+)\)\s*VALUES", re.IGNORECASE
+)
+
+
+def _detect_file_type(fp: Path) -> str:
+    name = fp.name.lower()
+    if name.endswith(".h2.db") or name.endswith(".mv.db"):
+        return "h2"
+    ext = fp.suffix.lower()
+    detected = _FILE_EXT_MAP.get(ext, "")
+    if detected:
+        return detected
+    try:
+        with open(fp, "rb") as f:
+            hdr = f.read(16)
+        if hdr.startswith(_SQLITE_MAGIC):
+            return "sqlite"
+        if hdr.startswith(_REDIS_MAGIC):
+            return "redis_rdb"
+    except OSError:
+        pass
+    return ""
+
+
+def _run_file_audit(db_file: str, cfg: dict) -> int:
+    fp = Path(db_file).resolve()
+    if not fp.exists():
+        _console.error(f"Database file not found: {db_file}")
+        return 1
+    if not fp.is_file():
+        _console.error(f"Not a file: {db_file}")
+        return 1
+
+    file_type = _detect_file_type(fp)
+    scan = cfg.get("scan", {})
+    override = scan.get("db_type", "").strip().lower()
+    if override:
+        _fa = {"sqldump": "sqldump", "sql": "sqldump", "dump": "sqldump",
+               "sqlite": "sqlite", "redis_rdb": "redis_rdb", "redis": "redis_rdb",
+               "h2": "h2"}
+        file_type = _fa.get(override, override)
+    if not file_type:
+        _console.error(
+            f"Cannot determine file type for: {fp.name}. "
+            "Use --db-type to specify (sqlite, sqldump, redis_rdb, h2).")
+        return 1
+
+    project = scan.get("project", "auger_output")
+    out = AugerOutput(project, file_type, str(fp), 0)
+
+    eng = cfg.get("engagement", {})
+    _u_dual_write_meta(
+        out.root, tool="auger", version=VERSION,
+        client_short=eng.get("client_short", ""),
+        client_name=eng.get("client_name", ""),
+        engagement_name=eng.get("engagement_name", ""),
+        target=f"file://{fp}",
+    )
+
+    _console.log(f"Auger v{VERSION} — File analysis: {fp.name} ({file_type})", "INFO")
+    _console.status("file_analysis", label="File Analysis", step="detect", status="running")
+    out.log_step(f"EVENT Auger v{VERSION} started — file analysis mode")
+    out.log_step(f"File: {fp} | Type: {file_type} | Size: {fp.stat().st_size} bytes")
+
+    phases_run = ["file_detection"]
+
+    # File permissions check (Unix)
+    try:
+        import stat as _stat_mod
+        st = fp.stat()
+        mode = st.st_mode
+        if mode & _stat_mod.S_IROTH:
+            risk = "MEDIUM" if (mode & _stat_mod.S_IWOTH) else "LOW"
+            perms = oct(mode)[-3:]
+            out.add_finding(
+                title="Database File — Insecure File Permissions",
+                risk=risk,
+                description=(
+                    f"The database file {fp.name} has overly permissive file permissions "
+                    f"(mode {perms}). "
+                    + ("World-writable: any local user can modify the database contents. "
+                       if mode & _stat_mod.S_IWOTH else
+                       "World-readable: any local user can read the database contents. ")
+                    + "Database files should be restricted to the owning user/group."),
+                phase="file_permissions",
+                command=f"ls -la {fp}",
+                output=f"Permissions: {perms} | Owner UID: {st.st_uid} | Group GID: {st.st_gid}",
+                catalogue_id="AU-FILE-001",
+                remediation="Restrict file permissions: chmod 600 or 640 for the database file.",
+                nist="AC-6",
+            )
+    except Exception:
+        pass
+    phases_run.append("file_permissions")
+
+    if file_type == "sqlite":
+        _fa_sqlite(fp, out)
+        phases_run.append("sqlite_analysis")
+    elif file_type == "sqldump":
+        _fa_sqldump(fp, out)
+        phases_run.append("sqldump_analysis")
+    elif file_type == "redis_rdb":
+        _fa_redis_rdb(fp, out)
+        phases_run.append("redis_rdb_analysis")
+    elif file_type == "h2":
+        _fa_h2(fp, out)
+        phases_run.append("h2_analysis")
+
+    out.write_checkpoint("file", file_type, list(set(phases_run)), True)
+    out.write_summary("file", file_type, True, list(set(phases_run)))
+    _u_augment_findings(out.findings_json, tool="auger", scope=None)
+
+    try:
+        findings = json.loads(out.findings_json.read_text())
+    except Exception:
+        findings = []
+    rc = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    for f in findings:
+        r = f.get("risk", "INFO").upper()
+        rc[r] = rc.get(r, 0) + 1
+
+    _console.log("=" * 60, "INFO")
+    _console.log(f"File analysis complete — {fp.name} ({file_type})", "SUCCESS")
+    _console.log(
+        f"Findings: {len(findings)} total | "
+        f"CRITICAL={rc['CRITICAL']} HIGH={rc['HIGH']} "
+        f"MEDIUM={rc['MEDIUM']} LOW={rc['LOW']} INFO={rc['INFO']}", "INFO")
+    _console.log(f"Output: {out.root}", "INFO")
+
+    if _PAUSE:
+        _PAUSE.write_stop_reason("completed", "all_phases_done")
+
+    _console.status("complete", label="File Analysis Complete", status="complete",
+                    progress=len(findings), total=len(findings))
+    return 0
+
+
+def _fa_sqlite(fp: Path, out: AugerOutput) -> None:
+    import sqlite3 as _sql3
+    _console.status("file_analysis", label="SQLite Analysis",
+                    step="schema", status="running")
+    out.log_step("EVENT SQLite analysis started")
+
+    try:
+        conn = _sql3.connect(f"file:{fp}?mode=ro", uri=True)
+    except Exception as exc:
+        out.add_finding(
+            title="SQLite Database — Cannot Open (Possibly Encrypted)",
+            risk="INFO",
+            description=(
+                f"The SQLite database {fp.name} could not be opened: {exc}. "
+                "This may indicate encryption (e.g. SQLCipher) or corruption."),
+            phase="sqlite_analysis", command=f"sqlite3 {fp} .tables",
+            catalogue_id="AU-FILE-002",
+        )
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        tables = cur.fetchall()
+        schema = {"tables": [], "total_rows": 0}
+        sens_tables = []
+
+        for tname, create_sql in tables:
+            try:
+                cur.execute(f'SELECT COUNT(*) FROM "{tname}"')
+                rows = cur.fetchone()[0]
+            except Exception:
+                rows = 0
+            schema["tables"].append({"name": tname, "rows": rows, "sql": create_sql or ""})
+            schema["total_rows"] += rows
+            if create_sql and _SENS_COL_RE.search(create_sql):
+                sens_tables.append({"table": tname,
+                                    "columns": _SENS_COL_RE.findall(create_sql),
+                                    "rows": rows})
+
+        out.write_schema(schema)
+        out.log_step(f"Schema: {len(tables)} tables, {schema['total_rows']} total rows")
+
+        if schema["tables"]:
+            out.add_finding(
+                title="SQLite Database — Schema Enumerated",
+                risk="INFO",
+                description=(
+                    f"SQLite database {fp.name} contains {len(tables)} table(s) "
+                    f"with {schema['total_rows']} total row(s)."),
+                phase="sqlite_analysis",
+                command=f"sqlite3 {fp} '.tables'",
+                output=", ".join(t["name"] for t in schema["tables"]),
+                catalogue_id="AU-FILE-003",
+            )
+
+        if sens_tables:
+            details = "; ".join(
+                f"{st['table']} ({', '.join(st['columns'][:5])}, {st['rows']} rows)"
+                for st in sens_tables)
+            out.add_finding(
+                title="SQLite Database — Sensitive Data Columns Detected",
+                risk="HIGH",
+                description=(
+                    f"Tables with columns matching sensitive data patterns "
+                    f"(passwords, tokens, PII) were found in {fp.name}: {details}. "
+                    "Data stored in SQLite files is unencrypted by default."),
+                phase="sqlite_analysis",
+                command=f"sqlite3 {fp} '.schema'",
+                output=details,
+                catalogue_id="AU-FILE-004",
+                remediation="Encrypt sensitive data at rest. Use SQLCipher or application-level encryption.",
+                nist="SC-28",
+            )
+
+        # Sample data scan
+        _console.status("file_analysis", label="SQLite Analysis",
+                        step="data_scan", status="running")
+        for st in sens_tables[:10]:
+            try:
+                cur.execute(f'SELECT * FROM "{st["table"]}" LIMIT 100')
+                rows = cur.fetchall()
+                col_names = [d[0] for d in cur.description] if cur.description else []
+                blob = "\n".join(" | ".join(str(c) for c in r) for r in rows)
+                for label, pat in _SENS_DATA_PATS.items():
+                    hits = pat.findall(blob)
+                    if hits:
+                        sample = hits[:3]
+                        risk = "CRITICAL" if label in ("private_key", "api_key") else "HIGH"
+                        out.add_finding(
+                            title=f"SQLite — {label.replace('_', ' ').title()} Data Exposed in {st['table']}",
+                            risk=risk,
+                            description=(
+                                f"Table '{st['table']}' contains {len(hits)} instance(s) of "
+                                f"{label.replace('_', ' ')} data in plaintext. "
+                                f"Sample (redacted): {', '.join(s[:8] + '...' for s in sample)}."),
+                            phase="sqlite_analysis",
+                            command=f'sqlite3 {fp} "SELECT * FROM {st["table"]} LIMIT 100"',
+                            output=f"Pattern: {label} | Hits: {len(hits)} | Columns: {', '.join(col_names[:10])}",
+                            catalogue_id="AU-FILE-005",
+                            remediation=f"Encrypt or hash {label.replace('_', ' ')} data. Remove unnecessary data.",
+                            nist="SC-28",
+                        )
+            except Exception:
+                pass
+
+        # Triggers
+        cur.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'")
+        triggers = cur.fetchall()
+        if triggers:
+            out.add_finding(
+                title="SQLite Database — Triggers Present",
+                risk="LOW",
+                description=(
+                    f"The database contains {len(triggers)} trigger(s): "
+                    f"{', '.join(t[0] for t in triggers)}. "
+                    "Review triggers for unintended side effects."),
+                phase="sqlite_analysis",
+                command=f"sqlite3 {fp} \"SELECT name,sql FROM sqlite_master WHERE type='trigger'\"",
+                output="\n".join(f"{t[0]}: {t[1]}" for t in triggers[:5]),
+                catalogue_id="AU-FILE-006",
+            )
+
+        # WAL file check
+        try:
+            cur.execute("PRAGMA journal_mode")
+            jmode = cur.fetchone()
+            if jmode and jmode[0].lower() == "wal":
+                wal = fp.parent / f"{fp.name}-wal"
+                if wal.exists() and wal.stat().st_size > 0:
+                    out.add_finding(
+                        title="SQLite Database — WAL File Contains Uncommitted Data",
+                        risk="LOW",
+                        description=(
+                            f"A WAL file exists ({wal.name}, {wal.stat().st_size} bytes). "
+                            "It may contain recently written data including sensitive records."),
+                        phase="sqlite_analysis",
+                        command=f"ls -la {wal}",
+                        catalogue_id="AU-FILE-007",
+                    )
+        except Exception:
+            pass
+    except Exception as exc:
+        _console.error(f"SQLite analysis error: {exc}")
+        out.log_error("sqlite3", str(exc))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _fa_sqldump(fp: Path, out: AugerOutput) -> None:
+    _console.status("file_analysis", label="SQL Dump Analysis",
+                    step="parse", status="running")
+    out.log_step("EVENT SQL dump analysis started")
+
+    max_bytes = 200 * 1024 * 1024
+    if fp.stat().st_size > max_bytes:
+        _console.log(f"SQL dump is large ({fp.stat().st_size // 1048576} MB). "
+                     "Analyzing first 200 MB.", "WARNING")
+
+    try:
+        with open(fp, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(max_bytes)
+    except Exception as exc:
+        _console.error(f"Cannot read SQL dump: {exc}")
+        out.log_error("sqldump", str(exc))
+        return
+
+    # Credential detection
+    creds = []
+    for pat in _SQL_CRED_RES:
+        for m in pat.finditer(content):
+            creds.append({"user": m.group(1), "password": m.group(2)[:4] + "***"})
+    if creds:
+        detail = "; ".join(f"{c['user']}:{c['password']}" for c in creds[:10])
+        out.add_finding(
+            title="SQL Dump — Plaintext Credentials in Database Statements",
+            risk="HIGH",
+            description=(
+                f"The SQL dump {fp.name} contains {len(creds)} "
+                f"CREATE USER / GRANT / ALTER USER statement(s) with plaintext passwords. "
+                f"Accounts (redacted): {detail}."),
+            phase="sqldump_analysis",
+            command=f"grep -Ei 'CREATE USER|GRANT.*PASSWORD' {fp.name}",
+            output=f"Credential statements found: {len(creds)}",
+            catalogue_id="AU-FILE-010",
+            remediation="Remove plaintext passwords from SQL dumps. Rotate exposed credentials.",
+            nist="IA-5",
+        )
+
+    # GRANT ALL
+    ga = _SQL_GRANT_ALL_RE.findall(content)
+    if ga:
+        out.add_finding(
+            title="SQL Dump — Excessive GRANT ALL Privileges",
+            risk="MEDIUM",
+            description=(
+                f"The SQL dump contains {len(ga)} GRANT ALL statement(s), "
+                "violating least privilege."),
+            phase="sqldump_analysis",
+            command=f"grep -i 'GRANT ALL' {fp.name}",
+            output="\n".join(m.strip()[:120] for m in ga[:5]),
+            catalogue_id="AU-FILE-011",
+            remediation="Replace GRANT ALL with specific privileges.",
+            nist="AC-6",
+        )
+
+    # Sensitive data in INSERT
+    _console.status("file_analysis", label="SQL Dump Analysis",
+                    step="data_scan", status="running")
+    si = []
+    for m in _SQL_SENS_INSERT_RE.finditer(content):
+        if _SENS_COL_RE.search(m.group(2)):
+            si.append(m.group(1))
+    if si:
+        uniq = list(dict.fromkeys(si))[:20]
+        out.add_finding(
+            title="SQL Dump — Sensitive Data in INSERT Statements",
+            risk="MEDIUM",
+            description=(
+                f"INSERT statements targeting tables with sensitive columns "
+                f"found: {', '.join(uniq[:10])}. Total: {len(si)} statement(s)."),
+            phase="sqldump_analysis",
+            command=f"grep -Ei 'INSERT INTO.*(password|token|ssn)' {fp.name}",
+            output=f"Tables: {', '.join(uniq[:10])}",
+            catalogue_id="AU-FILE-012",
+            remediation="Sanitize SQL dumps. Mask sensitive column values in exports.",
+            nist="SC-28",
+        )
+
+    # Sensitive data patterns
+    for label, pat in _SENS_DATA_PATS.items():
+        hits = pat.findall(content[:50_000_000])
+        if len(hits) > 2:
+            risk = "CRITICAL" if label in ("private_key", "api_key") else "HIGH"
+            out.add_finding(
+                title=f"SQL Dump — {label.replace('_', ' ').title()} Data Detected",
+                risk=risk,
+                description=(
+                    f"The SQL dump contains {len(hits)} instance(s) of "
+                    f"{label.replace('_', ' ')} data in plaintext."),
+                phase="sqldump_analysis",
+                command=f"grep -cE '{pat.pattern[:60]}' {fp.name}",
+                output=f"Pattern: {label} | Count: {len(hits)}",
+                catalogue_id="AU-FILE-013",
+                remediation=f"Remove or encrypt {label.replace('_', ' ')} data in exports.",
+                nist="SC-28",
+            )
+
+    # DB type detection from header
+    hdr = content[:5000].lower()
+    hints = []
+    if "mysql" in hdr or "mariadb" in hdr:   hints.append("MySQL/MariaDB")
+    if "postgresql" in hdr or "pg_dump" in hdr: hints.append("PostgreSQL")
+    if "microsoft sql server" in hdr:         hints.append("MSSQL")
+    if "oracle" in hdr or "pl/sql" in hdr:    hints.append("Oracle")
+    if hints:
+        out.add_finding(
+            title=f"SQL Dump — Database Type Identified: {', '.join(hints)}",
+            risk="INFO",
+            description=(
+                f"The SQL dump appears to originate from {', '.join(hints)}. "
+                f"File size: {fp.stat().st_size // 1024} KB."),
+            phase="sqldump_analysis",
+            command=f"head -20 {fp.name}",
+            output=content[:500],
+            catalogue_id="AU-FILE-014",
+        )
+
+
+def _fa_redis_rdb(fp: Path, out: AugerOutput) -> None:
+    _console.status("file_analysis", label="Redis RDB Analysis",
+                    step="header", status="running")
+    out.log_step("EVENT Redis RDB analysis started")
+
+    try:
+        with open(fp, "rb") as f:
+            hdr = f.read(16)
+    except Exception as exc:
+        _console.error(f"Cannot read RDB file: {exc}")
+        out.log_error("redis_rdb", str(exc))
+        return
+
+    if not hdr.startswith(_REDIS_MAGIC):
+        out.add_finding(
+            title="Redis RDB — Invalid or Corrupted File",
+            risk="INFO",
+            description=f"The file {fp.name} does not have a valid Redis RDB header.",
+            phase="redis_rdb_analysis", catalogue_id="AU-FILE-020",
+        )
+        return
+
+    ver = hdr[5:9].decode("ascii", errors="replace")
+    sz = fp.stat().st_size
+    out.add_finding(
+        title=f"Redis RDB — Dump File Identified (RDB v{ver})",
+        risk="INFO",
+        description=(
+            f"Redis RDB dump: {fp.name} (version {ver}, {sz // 1024} KB). "
+            "Contains a snapshot of all Redis data at a point in time."),
+        phase="redis_rdb_analysis",
+        command=f"xxd -l 16 {fp.name}",
+        output=f"Magic: REDIS | Version: {ver} | Size: {sz} bytes",
+        catalogue_id="AU-FILE-021",
+    )
+
+    try:
+        with open(fp, "rb") as f:
+            raw = f.read(min(sz, 100 * 1024 * 1024))
+        text = raw.decode("utf-8", errors="replace")
+        for label, pat in _SENS_DATA_PATS.items():
+            hits = pat.findall(text)
+            if hits:
+                risk = "HIGH" if label in ("private_key", "api_key", "password_hash") else "MEDIUM"
+                out.add_finding(
+                    title=f"Redis RDB — {label.replace('_', ' ').title()} Data in Dump",
+                    risk=risk,
+                    description=(
+                        f"The Redis RDB dump contains {len(hits)} instance(s) of "
+                        f"{label.replace('_', ' ')} data. Redis stores data unencrypted."),
+                    phase="redis_rdb_analysis",
+                    output=f"Pattern: {label} | Hits: {len(hits)}",
+                    catalogue_id="AU-FILE-022",
+                    remediation="Encrypt Redis RDB files at rest. Rotate exposed credentials.",
+                    nist="SC-28",
+                )
+    except Exception as exc:
+        out.log_error("redis_rdb", f"Binary scan error: {exc}")
+
+
+def _fa_h2(fp: Path, out: AugerOutput) -> None:
+    _console.status("file_analysis", label="H2 Database Analysis",
+                    step="detect", status="running")
+    out.log_step("EVENT H2 database analysis started")
+
+    sz = fp.stat().st_size
+    out.add_finding(
+        title="H2 Database File Identified",
+        risk="MEDIUM",
+        description=(
+            f"H2 database file: {fp.name} ({sz // 1024} KB). "
+            "H2 databases have been associated with critical vulnerabilities "
+            "including CVE-2021-42392 (JNDI injection/RCE) and CVE-2022-23221 "
+            "(JDBC URL injection)."),
+        phase="h2_analysis",
+        command=f"file {fp.name}",
+        output=f"File: {fp.name} | Size: {sz} bytes",
+        cves="CVE-2021-42392,CVE-2022-23221",
+        catalogue_id="AU-FILE-030",
+        remediation="Ensure H2 Console is not exposed. Update H2 to latest version.",
+        nist="SI-2",
+    )
+
+    try:
+        with open(fp, "rb") as f:
+            raw = f.read(min(sz, 50 * 1024 * 1024))
+        text = raw.decode("utf-8", errors="replace")
+        for label, pat in _SENS_DATA_PATS.items():
+            hits = pat.findall(text)
+            if hits:
+                risk = "HIGH" if label in ("private_key", "api_key") else "MEDIUM"
+                out.add_finding(
+                    title=f"H2 Database — {label.replace('_', ' ').title()} Data Detected",
+                    risk=risk,
+                    description=(
+                        f"The H2 database contains {len(hits)} instance(s) of "
+                        f"{label.replace('_', ' ')} data."),
+                    phase="h2_analysis",
+                    output=f"Pattern: {label} | Hits: {len(hits)}",
+                    catalogue_id="AU-FILE-031",
+                    remediation=f"Encrypt H2 database. Rotate exposed {label.replace('_', ' ')} data.",
+                    nist="SC-28",
+                )
+    except Exception as exc:
+        out.log_error("h2", f"Binary scan error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 def _parse_args() -> argparse.Namespace:
@@ -5097,17 +5654,22 @@ Examples:
   python3 auger.py --jdbc "jdbc:postgresql://db.example.com:5432/prod" -U postgres -P pass
   python3 auger.py --host redis.example.com --db-type redis --password supersecret --ssl
   python3 auger.py --settings /path/to/auger_settings.json
+  python3 auger.py --db-file /path/to/database.sqlite3
+  python3 auger.py --db-file /path/to/backup.sql --db-type sqldump
+  python3 auger.py --db-file /path/to/dump.rdb
 """
     )
     p.add_argument("--settings",    metavar="FILE",   help="JSON settings file (Crucible mode)")
     p.add_argument("--host",        metavar="HOST",   help="Target host/IP")
+    p.add_argument("--db-file",     metavar="PATH",   dest="db_file",
+                   help="Local database file to analyze (SQLite, SQL dump, Redis RDB, H2)")
     p.add_argument("--port",        metavar="PORT",   type=int, default=0)
     p.add_argument("--db-type",     metavar="TYPE",   help="Database type",
                    choices=["mysql","mariadb","postgresql","postgres","mssql","oracle",
                             "mongodb","redis","cassandra","elasticsearch","elastic","es",
                             "couchdb","influxdb","neo4j","memcached","redshift","dynamodb",
-                            # 2026-06-11 review round 4: native AWS RDS audit
-                            "rds"])
+                            "rds",
+                            "sqlite","sqldump","redis_rdb","h2"])
     p.add_argument("-U", "--username", metavar="USER", default="")
     p.add_argument("-P", "--password", metavar="PASS", default="")
     p.add_argument("--database",    metavar="DB",     default="",  help="Database/schema name")
@@ -5151,6 +5713,10 @@ def main() -> int:
             return 1
     else:
         cfg = _build_settings_from_args(args)
+
+    db_file = cfg.get("db_file", "")
+    if db_file:
+        return _run_file_audit(db_file, cfg)
 
     return run_audit(cfg)
 
