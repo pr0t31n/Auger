@@ -710,7 +710,7 @@
     },
     {
       "id": "AU-019",
-      "title": "CouchDB Admin Party Mode \u2014 No Admin Accounts Configured",
+      "title": "CouchDB Admin Party Mode — No Admin Accounts Configured",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2465,7 +2465,7 @@
     },
     {
       "id": "AU-064",
-      "title": "Neo4j Cluster Mode Detected \u2014 Verify Firewall Isolation",
+      "title": "Discovery: Neo4j Cluster Mode Detected — Verify Firewall Isolation",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2699,7 +2699,7 @@
     },
     {
       "id": "AU-070",
-      "title": "Oracle UTL_FILE_DIR Wildcard \u2014 Arbitrary File Read/Write",
+      "title": "Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -3206,7 +3206,7 @@
     },
     {
       "id": "AU-083",
-      "title": "Sensitive Data Columns Identified (Potential PII/PHI/PCI Scope)",
+      "title": "Information Disclosure: Sensitive Data Columns Identified (Potential PII/PHI/PCI Scope)",
       "aliases": [],
       "source_tools": [
         "auger"
