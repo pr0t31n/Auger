@@ -894,7 +894,7 @@ class MySQLAuditor:
         rows = self._q("SELECT user, host FROM mysql.user WHERE user=''")
         if rows:
             self.out.add_finding(
-                title="MySQL: Anonymous User Account Present",
+                title="Database: MySQL Anonymous User Account Present",
                 risk="HIGH", phase="accounts", catalogue_id="DB-100",
                 description="Anonymous (blank username) accounts exist allowing unauthenticated access.",
                 output=str(rows),
@@ -906,7 +906,7 @@ class MySQLAuditor:
         rows = self._q("SHOW DATABASES LIKE 'test'")
         if rows:
             self.out.add_finding(
-                title="MySQL: Test Database Present and Accessible",
+                title="Database: MySQL Test Database Present and Accessible",
                 risk="MEDIUM", phase="config", catalogue_id="DB-101",
                 description="The default 'test' database is present and accessible.",
                 output="Database 'test' exists",
@@ -918,7 +918,7 @@ class MySQLAuditor:
         val = self._var("local_infile")
         if val in ("on", "1", "yes"):
             self.out.add_finding(
-                title="MySQL: LOCAL INFILE Enabled",
+                title="Database: MySQL LOCAL INFILE Enabled",
                 risk="HIGH", phase="config", catalogue_id="DB-102",
                 description="local_infile=ON allows reading client-side files.",
                 output=f"local_infile = {val}",
@@ -931,7 +931,7 @@ class MySQLAuditor:
         if val == "" or val == "null":
             risk = "HIGH" if val == "" else "INFO"
             self.out.add_finding(
-                title="MySQL: secure_file_priv Not Configured",
+                title="Database: MySQL secure_file_priv Not Configured",
                 risk=risk, phase="config", catalogue_id="DB-103",
                 description="secure_file_priv is empty — file read/write operations are unrestricted.",
                 output=f"secure_file_priv = '{val}'",
@@ -945,7 +945,7 @@ class MySQLAuditor:
         )
         if rows:
             self.out.add_finding(
-                title="MySQL: Root Account Accessible Remotely",
+                title="Database: MySQL Root Account Accessible Remotely",
                 risk="CRITICAL", phase="accounts", catalogue_id="DB-104",
                 description="Root account has remote host entries allowing external connections.",
                 output=str(rows),
@@ -959,7 +959,7 @@ class MySQLAuditor:
                 ip=self.out.host, port=self.out.port,
                 title="Manual Verification Required — MySQL Root Remote Access",
                 description="Root account has remote host entries. Verify whether remote root access is intentional and test for weak credentials.",
-                source_finding="MySQL: Root Account Accessible Remotely",
+                source_finding="Database: MySQL Root Account Accessible Remotely",
                 priority="CRITICAL",
                 metadata={"db_type": self.out.db_type}
             )
@@ -970,7 +970,7 @@ class MySQLAuditor:
         )
         if rows:
             self.out.add_finding(
-                title="MySQL: User Account with Wildcard Host (%)",
+                title="Database: MySQL User Account with Wildcard Host (%)",
                 risk="HIGH", phase="accounts", catalogue_id="DB-105",
                 description=f"Accounts with wildcard hosts: {[r[0] for r in rows]}",
                 output=str(rows),
@@ -991,7 +991,7 @@ class MySQLAuditor:
             val = row[0]
         if val is None:
             self.out.add_finding(
-                title="MySQL: Password Validation Plugin Not Installed",
+                title="Database: MySQL Password Validation Plugin Not Installed",
                 risk="HIGH", phase="config", catalogue_id="DB-106",
                 description="No password validation plugin/component found.",
                 output="validate_password not installed",
@@ -1000,7 +1000,7 @@ class MySQLAuditor:
             )
         elif str(val).upper() in ("LOW", "0"):
             self.out.add_finding(
-                title="MySQL: Password Validation Policy Set to LOW",
+                title="Database: MySQL Password Validation Policy Set to LOW",
                 risk="MEDIUM", phase="config",
                 description="validate_password.policy=LOW only checks length, not complexity.",
                 output=f"validate_password.policy = {val}",
@@ -1014,7 +1014,7 @@ class MySQLAuditor:
         if val in ("on", "1"):
             path = self._var("general_log_file")
             self.out.add_finding(
-                title="MySQL: General Query Log Enabled",
+                title="Database: MySQL General Query Log Enabled",
                 risk="LOW", phase="logging", catalogue_id="DB-107",
                 description=f"General log is ON — queries (including passwords in plain-text) are logged to {path}.",
                 output=f"general_log=ON  general_log_file={path}",
@@ -1036,7 +1036,7 @@ class MySQLAuditor:
             )
         elif tls_req not in ("on", "1"):
             self.out.add_finding(
-                title="MySQL: TLS Not Required (Optional Only)",
+                title="Database: MySQL TLS Not Required (Optional Only)",
                 risk="MEDIUM", phase="network",
                 description="SSL is available but require_secure_transport=OFF — clients can connect without TLS.",
                 output=f"have_ssl={ssl_val}  require_secure_transport={tls_req}",
@@ -1134,7 +1134,7 @@ class MySQLAuditor:
         val = self._var("have_symlink")
         if val == "yes":
             self.out.add_finding(
-                title="MySQL: Symlink Support Enabled",
+                title="Database: MySQL Symlink Support Enabled",
                 risk="MEDIUM", phase="config", catalogue_id="DB-108",
                 description="have_symlink=YES — MySQL follows symlinks to table files.",
                 output=f"have_symlink = {val}",
@@ -1170,7 +1170,7 @@ class MySQLAuditor:
             if file_p:  privs.append("FILE")
             if privs and user.lower() not in ("root",):
                 self.out.add_finding(
-                    title=f"MySQL: Overprivileged Account '{user}'@'{host}'",
+                    title=f"Database: MySQL Overprivileged Account '{user}'@'{host}'",
                     risk="HIGH", phase="permissions", catalogue_id="DB-011",
                     description=f"Account '{user}'@'{host}' has dangerous privileges: {', '.join(privs)}",
                     output=f"user={user} host={host} privileges={privs}",
@@ -1186,7 +1186,7 @@ class MySQLAuditor:
                 missing.append(required)
         if missing:
             self.out.add_finding(
-                title="MySQL: sql_mode Too Permissive",
+                title="Database: MySQL sql_mode Too Permissive",
                 risk="LOW", phase="config", catalogue_id="DB-110",
                 description=f"sql_mode is missing recommended values: {missing}",
                 output=f"sql_mode = {val}",
@@ -1382,7 +1382,7 @@ class PostgreSQLAuditor:
         val = self._setting("password_encryption")
         if "md5" in val:
             self.out.add_finding(
-                title="PostgreSQL: Weak Password Encryption (MD5)",
+                title="Database: PostgreSQL Weak Password Encryption (MD5)",
                 risk="MEDIUM", phase="config", catalogue_id="DB-154",
                 description="password_encryption=md5 — use scram-sha-256 instead.",
                 output=f"password_encryption = {val}",
@@ -1396,7 +1396,7 @@ class PostgreSQLAuditor:
             users = [r[0] for r in rows]
             if len(users) > 1 or (users and users[0] not in ("postgres",)):
                 self.out.add_finding(
-                    title="PostgreSQL: Superuser Account Accessible Remotely",
+                    title="Database: PostgreSQL Superuser Account Accessible Remotely",
                     risk="HIGH", phase="accounts", catalogue_id="DB-151",
                     description=f"Superuser accounts: {users}. Verify remote access is restricted in pg_hba.conf.",
                     output=f"Superusers: {users}",
@@ -1412,7 +1412,7 @@ class PostgreSQLAuditor:
                     ip=self.out.host, port=self.out.port,
                     title="Manual Verification Required — PostgreSQL Superuser Remote Access",
                     description="Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
-                    source_finding="PostgreSQL: Superuser Account Accessible Remotely",
+                    source_finding="Database: PostgreSQL Superuser Account Accessible Remotely",
                     priority="HIGH",
                     metadata={"validation_notes": "Check pg_hba.conf: grep superuser /etc/postgresql/*/main/pg_hba.conf",
                               "db_type": self.out.db_type}
@@ -1424,7 +1424,7 @@ class PostgreSQLAuditor:
         )
         if rows and rows[0][0]:
             self.out.add_finding(
-                title="PostgreSQL: Excessive Permissions on Public Schema",
+                title="Database: PostgreSQL Excessive Permissions on Public Schema",
                 risk="MEDIUM", phase="permissions", catalogue_id="DB-155",
                 description="PUBLIC role has CREATE on public schema — CVE-2018-1058 search_path attack vector.",
                 output="has_schema_privilege('public', 'public', 'CREATE') = true",
@@ -1442,7 +1442,7 @@ class PostgreSQLAuditor:
         if rows:
             tables = [f"{r[0]}.{r[1]}" for r in rows[:10]]
             self.out.add_finding(
-                title="PostgreSQL: Row-Level Security Not Enabled on Sensitive Tables",
+                title="Database: PostgreSQL Row-Level Security Not Enabled on Sensitive Tables",
                 risk="HIGH", phase="permissions", catalogue_id="DB-153",
                 description=f"Tables with sensitive-looking names without RLS: {tables}",
                 output=str(tables),
@@ -1455,7 +1455,7 @@ class PostgreSQLAuditor:
         log_disc = self._setting("log_disconnections")
         if log_conn == "off" or log_disc == "off":
             self.out.add_finding(
-                title="PostgreSQL: Connection Logging Disabled",
+                title="Database: PostgreSQL Connection Logging Disabled",
                 risk="MEDIUM", phase="logging", catalogue_id="DB-156",
                 description=f"log_connections={log_conn}  log_disconnections={log_disc}",
                 output=f"log_connections={log_conn}, log_disconnections={log_disc}",
@@ -1473,7 +1473,7 @@ class PostgreSQLAuditor:
         if rows:
             found = [r[0] for r in rows]
             self.out.add_finding(
-                title="PostgreSQL: Dangerous Extensions Installed",
+                title="Database: PostgreSQL Dangerous Extensions Installed",
                 risk="HIGH", phase="config", catalogue_id="DB-157",
                 description=f"Potentially dangerous extensions found: {found}",
                 output=str(found),
@@ -1512,7 +1512,7 @@ class PostgreSQLAuditor:
         row = self._q1("SELECT usesuper FROM pg_user WHERE usename = current_user")
         if row and row[0]:
             self.out.add_finding(
-                title="PostgreSQL: COPY TO/FROM PROGRAM Feature Accessible",
+                title="Database: PostgreSQL COPY TO/FROM PROGRAM Feature Accessible",
                 risk="CRITICAL", phase="config", catalogue_id="DB-152",
                 description="Connected user has superuser — COPY FROM PROGRAM provides OS command execution.",
                 output="Current user is superuser",
@@ -1700,7 +1700,7 @@ class MSSQLAuditor:
         )
         if rows and int(rows[0][0]) == 1:
             self.out.add_finding(
-                title="MSSQL: xp_cmdshell Enabled",
+                title="Database: MSSQL xp_cmdshell Enabled",
                 risk="CRITICAL", phase="config", catalogue_id="DB-200",
                 description="xp_cmdshell is enabled — OS command execution possible from T-SQL.",
                 output="xp_cmdshell value_in_use = 1",
@@ -1714,7 +1714,7 @@ class MSSQLAuditor:
                 ip=self.out.host, port=self.out.port,
                 title="Exploit Verification — MSSQL xp_cmdshell RCE",
                 description="xp_cmdshell is enabled allowing OS command execution. Test with Metasploit mssql_payload or manual EXEC xp_cmdshell.",
-                source_finding="MSSQL: xp_cmdshell Enabled",
+                source_finding="Database: MSSQL xp_cmdshell Enabled",
                 priority="CRITICAL",
                 metadata={"db_type": "MSSQL", "module": "exploit/windows/mssql/mssql_payload"}
             )
@@ -1725,7 +1725,7 @@ class MSSQLAuditor:
         )
         if rows and rows[0][1] == 0:
             self.out.add_finding(
-                title="MSSQL: SA Account Enabled",
+                title="Database: MSSQL SA Account Enabled",
                 risk="HIGH", phase="accounts", catalogue_id="DB-201",
                 description="The 'sa' built-in account is enabled.",
                 output="sa account is_disabled=0",
@@ -1739,7 +1739,7 @@ class MSSQLAuditor:
         )
         if rows and int(rows[0][0]) == 1:
             self.out.add_finding(
-                title="MSSQL: CLR Integration Enabled",
+                title="Database: MSSQL CLR Integration Enabled",
                 risk="HIGH", phase="config", catalogue_id="DB-202",
                 description="CLR integration is enabled — .NET assemblies can run in SQL Server.",
                 output="clr enabled = 1",
@@ -1753,7 +1753,7 @@ class MSSQLAuditor:
         )
         if rows and int(rows[0][0]) == 1:
             self.out.add_finding(
-                title="MSSQL: OLE Automation Procedures Enabled",
+                title="Database: MSSQL OLE Automation Procedures Enabled",
                 risk="CRITICAL", phase="config", catalogue_id="DB-203",
                 description="OLE Automation Procedures enabled — COM/OLE objects accessible from T-SQL.",
                 output="Ole Automation Procedures = 1",
@@ -1768,7 +1768,7 @@ class MSSQLAuditor:
         if rows:
             ls = [r[0] for r in rows]
             self.out.add_finding(
-                title="MSSQL: Linked Servers Configured",
+                title="Database: MSSQL Linked Servers Configured",
                 risk="HIGH", phase="config", catalogue_id="DB-204",
                 description=f"Linked servers found: {ls}",
                 output=str(rows)[:500],
@@ -1785,7 +1785,7 @@ class MSSQLAuditor:
         )
         if rows:
             self.out.add_finding(
-                title="MSSQL: BUILTIN\\Administrators in Sysadmin Role",
+                title="Database: MSSQL BUILTIN\\Administrators in Sysadmin Role",
                 risk="HIGH", phase="permissions", catalogue_id="DB-206",
                 description=f"BUILTIN accounts with sysadmin: {[r[0] for r in rows]}",
                 output=str(rows),
@@ -1801,7 +1801,7 @@ class MSSQLAuditor:
         if rows:
             logins = [r[0] for r in rows]
             self.out.add_finding(
-                title="MSSQL: Mixed Mode Authentication with SQL Logins Not Subject to Password Policy",
+                title="Database: MSSQL Mixed Mode Authentication with SQL Logins Not Subject to Password Policy",
                 risk="HIGH", phase="config", catalogue_id="DB-205",
                 description=f"SQL logins without policy/expiry check: {logins}",
                 output=str(rows)[:500],
@@ -1819,7 +1819,7 @@ class MSSQLAuditor:
         if rows:
             dbs = [r[0] for r in rows]
             self.out.add_finding(
-                title="MSSQL: Transparent Data Encryption (TDE) Not Enabled",
+                title="Database: MSSQL Transparent Data Encryption (TDE) Not Enabled",
                 risk="HIGH", phase="crypto", catalogue_id="DB-207",
                 description=f"Databases without TDE: {dbs}",
                 output=str(dbs),
@@ -1833,7 +1833,7 @@ class MSSQLAuditor:
         )
         if rows and int(rows[0][0]) == 1:
             self.out.add_finding(
-                title="MSSQL: Ad Hoc Distributed Queries Enabled",
+                title="Database: MSSQL Ad Hoc Distributed Queries Enabled",
                 risk="HIGH", phase="config", catalogue_id="DB-208",
                 description="Ad Hoc Distributed Queries enabled — OPENROWSET/OPENDATASOURCE accessible.",
                 output="Ad Hoc Distributed Queries = 1",
@@ -1847,7 +1847,7 @@ class MSSQLAuditor:
         )
         if rows and int(rows[0][0]) == 1:
             self.out.add_finding(
-                title="MSSQL: Database Mail Enabled",
+                title="Database: MSSQL Database Mail Enabled",
                 risk="LOW", phase="config",
                 description="Database Mail XPs are enabled. Review if required.",
                 output="Database Mail XPs = 1",
@@ -1925,7 +1925,7 @@ class MSSQLAuditor:
             pii_rows = []
         if pii_rows:
             self.out.add_finding(
-                title=f"MSSQL: {len(pii_rows)} PII-shaped column(s) NOT Always Encrypted",
+                title=f"Database: MSSQL {len(pii_rows)} PII-shaped column(s) NOT Always Encrypted",
                 risk="HIGH", phase="crypto", catalogue_id="DB-MS-021-B",
                 description=("Columns with PII-shaped names exist without "
                               "Always Encrypted column encryption. PII / PCI "
@@ -2103,7 +2103,7 @@ class MongoDBauditor:
             test.admin.command("ping")
             # If no exception, auth is not required
             self.out.add_finding(
-                title="MongoDB: Authentication Disabled",
+                title="Database: MongoDB Authentication Disabled",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-300",
                 description="MongoDB accepted connection without authentication.",
                 output=f"Connected to {self.host}:{self.port} without credentials",
@@ -2117,7 +2117,7 @@ class MongoDBauditor:
                 ip=self.out.host, port=self.out.port,
                 title="Manual Verification Required — MongoDB No Authentication",
                 description="MongoDB accepts unauthenticated connections. Enumerate databases and assess data exposure.",
-                source_finding="MongoDB: Authentication Disabled",
+                source_finding="Database: MongoDB Authentication Disabled",
                 priority="CRITICAL",
                 metadata={"db_type": "MongoDB"}
             )
@@ -2132,7 +2132,7 @@ class MongoDBauditor:
             )
             if result.get("javascriptEnabled", True):
                 self.out.add_finding(
-                    title="MongoDB: Server-Side JavaScript Execution Enabled",
+                    title="Database: MongoDB Server-Side JavaScript Execution Enabled",
                     risk="MEDIUM", phase="config", catalogue_id="DB-301",
                     description="Server-side JavaScript is enabled — $where, mapReduce available.",
                     output="javascriptEnabled=true",
@@ -2149,7 +2149,7 @@ class MongoDBauditor:
             mode = opts.get("mode", "disabled")
             if mode not in ("requireTLS", "allowTLS"):
                 self.out.add_finding(
-                    title="MongoDB: No TLS/SSL Configured",
+                    title="Database: MongoDB No TLS/SSL Configured",
                     risk="HIGH", phase="network", catalogue_id="DB-302",
                     description=f"MongoDB TLS mode={mode!r} — connections may be unencrypted.",
                     output=f"net.tls.mode = {mode}",
@@ -2167,7 +2167,7 @@ class MongoDBauditor:
                 for role in u.get("roles", []):
                     if role.get("role") in ("root", "__system"):
                         self.out.add_finding(
-                            title="MongoDB: User with Root or __system Role",
+                            title="Database: MongoDB User with Root or __system Role",
                             risk="CRITICAL", phase="accounts", catalogue_id="DB-303",
                             description=f"User {u['user']} has dangerous role: {role['role']}",
                             output=f"user={u['user']} role={role['role']} db={role.get('db','')}",
@@ -2240,7 +2240,7 @@ class MongoDBauditor:
                             danger.append(r["role"])
             if danger:
                 self.out.add_finding(
-                    title=f"MongoDB: Non-system role(s) can read oplog.rs",
+                    title=f"Database: MongoDB Non-system role(s) can read oplog.rs",
                     risk="HIGH", phase="permissions", catalogue_id="DB-MDB-020",
                     description=(f"Roles {danger} have access to local.oplog.rs. "
                                   "Oplog records every database mutation; access allows "
@@ -2371,7 +2371,7 @@ class RedisAuditor:
                              decode_responses=True)
             r2.ping()
             self.out.add_finding(
-                title="Redis: No Authentication Configured (requirepass Not Set)",
+                title="Database: Redis No Authentication Configured (requirepass Not Set)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-350",
                 description="Redis is accessible without a password.",
                 output=f"Connected to {self.host}:{self.port} without credentials",
@@ -2385,7 +2385,7 @@ class RedisAuditor:
                 ip=self.out.host, port=self.out.port,
                 title="Manual Verification Required — Redis No Authentication",
                 description="Redis accepts unauthenticated connections. Test for data exfiltration and RCE via CONFIG SET / MODULE LOAD.",
-                source_finding="Redis: No Authentication Configured (requirepass Not Set)",
+                source_finding="Database: Redis No Authentication Configured (requirepass Not Set)",
                 priority="CRITICAL",
                 metadata={"db_type": "Redis"}
             )
@@ -2397,7 +2397,7 @@ class RedisAuditor:
             pm = self._client.config_get("protected-mode")
             if pm.get("protected-mode", "yes").lower() in ("no", "0", "false"):
                 self.out.add_finding(
-                    title="Redis: Protected Mode Disabled",
+                    title="Database: Redis Protected Mode Disabled",
                     risk="HIGH", phase="config", catalogue_id="DB-351",
                     description="protected-mode=no — the safety layer is disabled.",
                     output="protected-mode = no",
@@ -2430,7 +2430,7 @@ class RedisAuditor:
                     accessible.append(cmd)
         if accessible:
             self.out.add_finding(
-                title="Redis: Dangerous Commands Not Renamed or Disabled",
+                title="Database: Redis Dangerous Commands Not Renamed or Disabled",
                 risk="HIGH", phase="config", catalogue_id="DB-352",
                 description=f"Dangerous commands accessible: {accessible}",
                 output=f"Accessible: {accessible}",
@@ -2479,7 +2479,7 @@ class RedisAuditor:
                     default_full = True
             if default_full:
                 self.out.add_finding(
-                    title="Redis: Default ACL User Has Full Access (nopass +@all)",
+                    title="Database: Redis Default ACL User Has Full Access (nopass +@all)",
                     risk="CRITICAL", phase="auth",
                     description="The default Redis ACL user has no password and full command access.",
                     output=str(acl_list)[:300],
@@ -2609,7 +2609,7 @@ class CassandraAuditor:
         """Try AllowAll — if we connected without a username, auth is disabled."""
         if not self.username:
             self.out.add_finding(
-                title="Cassandra: AllowAllAuthenticator Configured (No Authentication)",
+                title="Database: Cassandra AllowAllAuthenticator Configured (No Authentication)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-400",
                 description="Connected without credentials — authentication is disabled.",
                 output=f"Connected to {self.host}:{self.port} without credentials",
@@ -2636,7 +2636,7 @@ class CassandraAuditor:
                 s.shutdown()
                 cl.shutdown()
                 self.out.add_finding(
-                    title="Cassandra: Default cassandra/cassandra Credentials in Use",
+                    title="Database: Cassandra Default Credentials in Use",
                     risk="CRITICAL", phase="auth", catalogue_id="DB-401",
                     description=f"Authenticated with default credentials: {user}/{pwd}",
                     output=f"user={user}", db_version=self._version,
@@ -2659,7 +2659,7 @@ class CassandraAuditor:
             s.shutdown()
             cl.shutdown()
             self.out.add_finding(
-                title="Cassandra: Client-to-Server Encryption Disabled",
+                title="Database: Cassandra Client-to-Server Encryption Disabled",
                 risk="HIGH", phase="network", catalogue_id="DB-402",
                 description="Cassandra accepted a cleartext (non-TLS) connection.",
                 output=f"Connected to {self.host}:{self.port} without TLS",
@@ -2681,7 +2681,7 @@ class CassandraAuditor:
             )
         if len(users) > 2:
             self.out.add_finding(
-                title="Cassandra: Multiple Superuser Accounts",
+                title="Database: Cassandra Multiple Superuser Accounts",
                 risk="MEDIUM", phase="accounts",
                 description=f"More than 2 superuser accounts found: {users}",
                 output=str(users),
@@ -2780,7 +2780,7 @@ class ElasticsearchAuditor:
         result = self._get("/_cluster/health")
         if "_error" not in result:
             self.out.add_finding(
-                title="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                title="Database: Elasticsearch Security Features Disabled (X-Pack Security)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-450",
                 description="Elasticsearch cluster health accessible without authentication.",
                 output=json.dumps(result)[:500],
@@ -2794,7 +2794,7 @@ class ElasticsearchAuditor:
                 ip=self.out.host, port=self.out.port,
                 title="Manual Verification Required — Elasticsearch No Authentication",
                 description="Elasticsearch cluster accessible without authentication. Enumerate indices and assess data exposure.",
-                source_finding="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                source_finding="Database: Elasticsearch Security Features Disabled (X-Pack Security)",
                 priority="CRITICAL",
                 metadata={"db_type": "Elasticsearch"}
             )
@@ -2803,7 +2803,7 @@ class ElasticsearchAuditor:
         data = self._get("/")
         if "cluster_name" in data:
             self.out.add_finding(
-                title="Elasticsearch: Unauthenticated Cluster Information Exposed",
+                title="Database: Elasticsearch Unauthenticated Cluster Information Exposed",
                 risk="HIGH", phase="config", catalogue_id="DB-451",
                 description=f"Cluster info exposed: cluster_name={data.get('cluster_name')} version={data.get('version',{}).get('number')}",
                 output=json.dumps(data)[:500],
@@ -2816,7 +2816,7 @@ class ElasticsearchAuditor:
         if isinstance(result, list) and result:
             idx_names = [i.get("index", "") for i in result]
             self.out.add_finding(
-                title="Elasticsearch: Index Enumeration Without Authentication",
+                title="Database: Elasticsearch Index Enumeration Without Authentication",
                 risk="HIGH", phase="permissions",
                 description=f"All {len(idx_names)} indices are enumerable without auth.",
                 output=str(idx_names[:20]),
@@ -2830,7 +2830,7 @@ class ElasticsearchAuditor:
         sec = result.get("defaults", {}).get("xpack", {}).get("security", {})
         if sec.get("enabled") is False:
             self.out.add_finding(
-                title="Elasticsearch: Security Features Disabled (X-Pack Security)",
+                title="Database: Elasticsearch Security Features Disabled (X-Pack Security)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-450",
                 description="xpack.security.enabled=false",
                 output=json.dumps(sec)[:300],
@@ -3138,7 +3138,7 @@ class CouchDBAuditor:
         code, body = self._get("/_config/admins")
         if code == 200 and isinstance(body, dict) and len(body) == 0:
             self.out.add_finding(
-                title="CouchDB: CouchDB Admin Party Mode — No Admin Accounts Configured",
+                title="Database: CouchDB Admin Party Mode — No Admin Accounts Configured",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-400",
                 description="CouchDB has no admin accounts; any request has full admin access.",
                 output="/_config/admins returned empty object",
@@ -3150,7 +3150,7 @@ class CouchDBAuditor:
         code, body = self._get("/_all_dbs")
         if code == 200 and isinstance(body, list):
             self.out.add_finding(
-                title="CouchDB: Unauthenticated Access to /_all_dbs",
+                title="Database: CouchDB Unauthenticated Access to /_all_dbs",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-450",
                 description=f"All databases readable without credentials: {body[:10]}",
                 output=str(body[:10]), db_version=self._version,
@@ -3246,7 +3246,7 @@ class InfluxDBAuditor:
         code, body = self._get("/api/v2/setup")
         if code == 200 and not body.get("allowed", True):
             self.out.add_finding(
-                title="InfluxDB: InfluxDB 2.x Initial Setup Not Completed",
+                title="Database: InfluxDB 2.x Initial Setup Not Completed",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-420",
                 description="InfluxDB setup endpoint indicates initial admin setup has not been completed.",
                 output=str(body)[:300], db_version=self._version,
@@ -3257,7 +3257,7 @@ class InfluxDBAuditor:
         code, body = self._get("/api/v2/authorizations")
         if code == 200:
             self.out.add_finding(
-                title="InfluxDB: InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
+                title="Database: InfluxDB 2.x Authorizations Endpoint Accessible Without Token",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-450",
                 description="Token authorizations accessible without authentication.",
                 output=str(body)[:300], db_version=self._version,
@@ -3435,7 +3435,7 @@ class Neo4jAuditor:
             roles = row.get("rolesExecution") or []
             if name in dangerous and (not roles or "PUBLIC" in roles):
                 self.out.add_finding(
-                    title=f"Neo4j: Neo4j Dangerous Procedure Publicly Accessible: {name}",
+                    title=f"Database: Neo4j Dangerous Procedure Publicly Accessible: {name}",
                     risk="HIGH", phase="permissions", catalogue_id="DB-432",
                     description=f"Procedure '{name}' callable by PUBLIC role — may allow code execution or privilege escalation.",
                     output=f"procedure={name} roles={roles}", db_version=self._version,
@@ -3509,7 +3509,7 @@ class MemcachedAuditor:
                     val = line.split()[-1].strip().lower()
                     if val in ("no", "false", "0"):
                         self.out.add_finding(
-                            title="Memcached: SASL Authentication Disabled",
+                            title="Database: Memcached SASL Authentication Disabled",
                             risk="CRITICAL", phase="auth", catalogue_id="DB-440",
                             description="Memcached has no authentication; any client can read/write all cached data.",
                             output=line, db_version=self._version,
@@ -3517,7 +3517,7 @@ class MemcachedAuditor:
                         )
         else:
             self.out.add_finding(
-                title="Memcached: No Authentication (SASL Not Supported)",
+                title="Database: Memcached No Authentication (SASL Not Supported)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-440",
                 description="Memcached instance accessible without any authentication.",
                 output=resp[:200], db_version=self._version,
@@ -3535,7 +3535,7 @@ class MemcachedAuditor:
                     sensitive_keys.append(line.strip())
             if sensitive_keys:
                 self.out.add_finding(
-                    title="Memcached: Runtime Statistics Accessible Without Authentication",
+                    title="Database: Memcached Runtime Statistics Accessible Without Authentication",
                     risk="HIGH", phase="config", catalogue_id="DB-441",
                     description="STATS command reveals process ID, memory usage, connection counts.",
                     output="\n".join(sensitive_keys[:10]), db_version=self._version,
@@ -3560,7 +3560,7 @@ class MemcachedAuditor:
                 key_names = [ln.split()[1] for ln in sample_resp.splitlines()
                              if ln.startswith("ITEM")]
                 self.out.add_finding(
-                    title="Memcached: Cached Data Keys Enumerable Without Authentication",
+                    title="Database: Memcached Cached Data Keys Enumerable Without Authentication",
                     risk="HIGH", phase="data", catalogue_id="DB-442",
                     description=f"Sample cached keys: {key_names[:5]}",
                     output=sample_resp[:400], db_version=self._version,
@@ -3575,7 +3575,7 @@ class MemcachedAuditor:
                     ip=self.out.host, port=self.out.port,
                     title="Manual Verification Required — Memcached Data Key Enumeration",
                     description="Review key names for PII/session tokens/API keys.",
-                    source_finding="Memcached: Cached Data Keys Enumerable Without Authentication",
+                    source_finding="Database: Memcached Cached Data Keys Enumerable Without Authentication",
                     priority="HIGH",
                     metadata={"validation_notes": "Review key names for PII/session tokens/API keys.",
                               "db_type": self.out.db_type}
