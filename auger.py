@@ -2946,7 +2946,7 @@ class OracleAuditor:
         if rows:
             users = [r[0] for r in rows]
             self.out.add_finding(
-                title="Oracle: Oracle Default Sample Schema Accounts Active",
+                title="Database: Oracle Default Sample Schema Accounts Active",
                 risk="HIGH", phase="auth", catalogue_id="DB-006",
                 description=f"Default Oracle schema accounts are active: {users}",
                 output=str(users), db_version=self._version,
@@ -2964,7 +2964,7 @@ class OracleAuditor:
         if rows:
             grants = [f"{r[2]} {r[1]}" for r in rows]
             self.out.add_finding(
-                title="Oracle: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
+                title="Database: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
                 risk="HIGH", phase="permissions", catalogue_id="DB-053",
                 description=f"PUBLIC execute grants on privileged packages: {grants}",
                 output=str(grants), db_version=self._version,
@@ -2975,7 +2975,7 @@ class OracleAuditor:
         row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='remote_os_authent'")
         if row and str(row[0]).upper() == "TRUE":
             self.out.add_finding(
-                title="Oracle: Oracle REMOTE_OS_AUTHENT Enabled",
+                title="Database: Oracle REMOTE_OS_AUTHENT Enabled",
                 risk="CRITICAL", phase="config", catalogue_id="DB-051",
                 description="REMOTE_OS_AUTHENT=TRUE allows OS-level authentication bypass.",
                 output="remote_os_authent=TRUE", db_version=self._version,
@@ -2986,7 +2986,7 @@ class OracleAuditor:
         row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='utl_file_dir'")
         if row and str(row[0]).strip() in ("*", "/"):
             self.out.add_finding(
-                title="Oracle: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
+                title="Database: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
                 risk="HIGH", phase="config", catalogue_id="DB-052",
                 description=f"UTL_FILE_DIR={row[0]} permits read/write of any OS file.",
                 output=f"utl_file_dir={row[0]}", db_version=self._version,
@@ -2998,7 +2998,7 @@ class OracleAuditor:
         val = str(row[0]).upper() if row else "NONE"
         if val in ("NONE", "FALSE"):
             self.out.add_finding(
-                title="Oracle: Oracle Unified Auditing Disabled",
+                title="Database: Oracle Unified Auditing Disabled",
                 risk="MEDIUM", phase="config", catalogue_id="DB-054",
                 description="AUDIT_TRAIL=NONE — no audit records are generated.",
                 output=f"audit_trail={val}", db_version=self._version,
@@ -3016,7 +3016,7 @@ class OracleAuditor:
         if rows:
             privs = [f"{r[0]}:{r[1]}" for r in rows[:20]]
             self.out.add_finding(
-                title="Oracle: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
+                title="Database: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
                 risk="HIGH", phase="permissions", catalogue_id="DB-055",
                 description=f"High-privilege grants: {privs}",
                 output=str(privs), db_version=self._version,
@@ -3032,7 +3032,7 @@ class OracleAuditor:
         if rows:
             users = [r[0] for r in rows]
             self.out.add_finding(
-                title="Oracle: Oracle Accounts Using Weak 10g DES Password Hash",
+                title="Database: Oracle Accounts Using Weak 10g DES Password Hash",
                 risk="HIGH", phase="auth", catalogue_id="DB-056",
                 description=f"Accounts still using MD5/DES 10g hash: {users}",
                 output=str(users), db_version=self._version,
@@ -3045,7 +3045,7 @@ class OracleAuditor:
         )
         if rows and str(rows[0][0]).upper() != "TRUE":
             self.out.add_finding(
-                title="Oracle: Oracle Label Security (OLS) Not Enabled",
+                title="Database: Oracle Label Security (OLS) Not Enabled",
                 risk="LOW", phase="config", catalogue_id="DB-057",
                 description="Oracle Label Security is not active — row-level access control unavailable.",
                 output="OLS_STATUS=FALSE", db_version=self._version,

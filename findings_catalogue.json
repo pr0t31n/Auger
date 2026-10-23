@@ -827,7 +827,7 @@
     },
     {
       "id": "AU-022",
-      "title": "Oracle: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
+      "title": "Database: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1061,7 +1061,7 @@
     },
     {
       "id": "AU-028",
-      "title": "Oracle: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
+      "title": "Database: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2504,7 +2504,7 @@
     },
     {
       "id": "AU-065",
-      "title": "Oracle: Oracle Accounts Using Weak 10g DES Password Hash",
+      "title": "Database: Oracle Accounts Using Weak 10g DES Password Hash",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2543,7 +2543,7 @@
     },
     {
       "id": "AU-066",
-      "title": "Oracle: Oracle Default Sample Schema Accounts Active",
+      "title": "Database: Oracle Default Sample Schema Accounts Active",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2582,7 +2582,7 @@
     },
     {
       "id": "AU-067",
-      "title": "Oracle: Oracle Label Security (OLS) Not Enabled",
+      "title": "Database: Oracle Label Security (OLS) Not Enabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2621,7 +2621,7 @@
     },
     {
       "id": "AU-068",
-      "title": "Oracle: Oracle REMOTE_OS_AUTHENT Enabled",
+      "title": "Database: Oracle REMOTE_OS_AUTHENT Enabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2660,7 +2660,7 @@
     },
     {
       "id": "AU-069",
-      "title": "Oracle: Oracle Unified Auditing Disabled",
+      "title": "Database: Oracle Unified Auditing Disabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2699,7 +2699,7 @@
     },
     {
       "id": "AU-070",
-      "title": "Oracle: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
+      "title": "Database: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
       "aliases": [],
       "source_tools": [
         "auger"
