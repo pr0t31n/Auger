@@ -8,7 +8,7 @@
   "findings": [
     {
       "id": "AU-001",
-      "title": "CouchDB Default Credentials: {user}/{pwd}",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -47,7 +47,7 @@
     },
     {
       "id": "AU-002",
-      "title": "End-of-Life Cassandra Version: {ver}",
+      "title": "EOL Software: End-of-Life Cassandra Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -86,7 +86,7 @@
     },
     {
       "id": "AU-003",
-      "title": "End-of-Life Elasticsearch Version: {ver}",
+      "title": "EOL Software: End-of-Life Elasticsearch Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -125,7 +125,7 @@
     },
     {
       "id": "AU-004",
-      "title": "End-of-Life MongoDB Version: {ver}",
+      "title": "EOL Software: End-of-Life MongoDB Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -164,7 +164,7 @@
     },
     {
       "id": "AU-005",
-      "title": "End-of-Life MSSQL Version: SQL Server {yr}",
+      "title": "EOL Software: End-of-Life MSSQL Version: SQL Server {yr}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -203,7 +203,7 @@
     },
     {
       "id": "AU-006",
-      "title": "End-of-Life MySQL/MariaDB Version: {ver}",
+      "title": "EOL Software: End-of-Life MySQL/MariaDB Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -242,7 +242,7 @@
     },
     {
       "id": "AU-007",
-      "title": "End-of-Life Oracle Database Version: {ver}",
+      "title": "EOL Software: End-of-Life Oracle Database Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -281,7 +281,7 @@
     },
     {
       "id": "AU-008",
-      "title": "End-of-Life PostgreSQL Version: {ver_num}",
+      "title": "EOL Software: End-of-Life PostgreSQL Version: {ver_num}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -320,7 +320,7 @@
     },
     {
       "id": "AU-009",
-      "title": "End-of-Life Redis Version: {ver}",
+      "title": "EOL Software: End-of-Life Redis Version: {ver}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -359,7 +359,7 @@
     },
     {
       "id": "AU-010",
-      "title": "InfluxDB Default Credentials: {user}/{pwd}",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -398,7 +398,7 @@
     },
     {
       "id": "AU-011",
-      "title": "Neo4j Dangerous Procedure Publicly Accessible: {name}",
+      "title": "Neo4j: Neo4j Dangerous Procedure Publicly Accessible: {name}",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -437,7 +437,7 @@
     },
     {
       "id": "AU-012",
-      "title": "Neo4j Default Credentials: {user}/{pwd}",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -476,7 +476,7 @@
     },
     {
       "id": "AU-013",
-      "title": "Audit Logging Disabled",
+      "title": "Database: Audit Logging Disabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -671,7 +671,7 @@
     },
     {
       "id": "AU-018",
-      "title": "Cleartext Database Protocol (No TLS/SSL)",
+      "title": "Database: Cleartext Database Protocol (No TLS/SSL)",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -710,7 +710,7 @@
     },
     {
       "id": "AU-019",
-      "title": "CouchDB Admin Party Mode — No Admin Accounts Configured",
+      "title": "CouchDB: CouchDB Admin Party Mode — No Admin Accounts Configured",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -749,7 +749,7 @@
     },
     {
       "id": "AU-020",
-      "title": "CouchDB Node Configuration Exposed Without Authentication",
+      "title": "Authentication Bypass: CouchDB Node Configuration Exposed Without Authentication",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -827,7 +827,7 @@
     },
     {
       "id": "AU-022",
-      "title": "Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
+      "title": "Oracle: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -866,7 +866,7 @@
     },
     {
       "id": "AU-023",
-      "title": "Database Listening on All Network Interfaces (0.0.0.0)",
+      "title": "Database: Database Listening on All Network Interfaces (0.0.0.0)",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -905,7 +905,7 @@
     },
     {
       "id": "AU-024",
-      "title": "Default Credentials in Use",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1061,7 +1061,7 @@
     },
     {
       "id": "AU-028",
-      "title": "Excessive Oracle System Privileges Granted to Non-SYS Accounts",
+      "title": "Oracle: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1100,7 +1100,7 @@
     },
     {
       "id": "AU-029",
-      "title": "Expired TLS Certificate",
+      "title": "SSL/TLS Certificate: Expired TLS Certificate",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1139,7 +1139,7 @@
     },
     {
       "id": "AU-030",
-      "title": "InfluxDB 2.x Buckets Exposed Without Authentication",
+      "title": "Authentication Bypass: InfluxDB 2.x Buckets Exposed Without Authentication",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1178,7 +1178,7 @@
     },
     {
       "id": "AU-031",
-      "title": "InfluxDB 2.x Initial Setup Not Completed",
+      "title": "InfluxDB: InfluxDB 2.x Initial Setup Not Completed",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -1217,7 +1217,7 @@
     },
     {
       "id": "AU-032",
-      "title": "InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
+      "title": "InfluxDB: InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2426,7 +2426,7 @@
     },
     {
       "id": "AU-063",
-      "title": "Neo4j Authentication Disabled (dbms.security.auth_enabled=false)",
+      "title": "Authentication Bypass: Neo4j Authentication Disabled (dbms.security.auth_enabled=false)",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2504,7 +2504,7 @@
     },
     {
       "id": "AU-065",
-      "title": "Oracle Accounts Using Weak 10g DES Password Hash",
+      "title": "Oracle: Oracle Accounts Using Weak 10g DES Password Hash",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2543,7 +2543,7 @@
     },
     {
       "id": "AU-066",
-      "title": "Oracle Default Sample Schema Accounts Active",
+      "title": "Oracle: Oracle Default Sample Schema Accounts Active",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2582,7 +2582,7 @@
     },
     {
       "id": "AU-067",
-      "title": "Oracle Label Security (OLS) Not Enabled",
+      "title": "Oracle: Oracle Label Security (OLS) Not Enabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2621,7 +2621,7 @@
     },
     {
       "id": "AU-068",
-      "title": "Oracle REMOTE_OS_AUTHENT Enabled",
+      "title": "Oracle: Oracle REMOTE_OS_AUTHENT Enabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2660,7 +2660,7 @@
     },
     {
       "id": "AU-069",
-      "title": "Oracle Unified Auditing Disabled",
+      "title": "Oracle: Oracle Unified Auditing Disabled",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -2699,7 +2699,7 @@
     },
     {
       "id": "AU-070",
-      "title": "Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
+      "title": "Oracle: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -3167,7 +3167,7 @@
     },
     {
       "id": "AU-082",
-      "title": "Self-Signed or Expired TLS Certificate",
+      "title": "SSL/TLS Certificate: Self-Signed or Expired TLS Certificate",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -3245,7 +3245,7 @@
     },
     {
       "id": "AU-084",
-      "title": "Weak Cipher Suites Accepted",
+      "title": "SSL/TLS Ciphers: Weak Cipher Suites Accepted",
       "aliases": [],
       "source_tools": [
         "auger"
@@ -3284,7 +3284,7 @@
     },
     {
       "id": "AU-085",
-      "title": "Weak TLS Version (TLS 1.0 or TLS 1.1)",
+      "title": "Insecure Protocol Detected: Weak TLS Version (TLS 1.0 or TLS 1.1)",
       "aliases": [],
       "source_tools": [
         "auger"

@@ -820,7 +820,7 @@ class MySQLAuditor:
         eol = _EOL_VERSIONS.get(db_type, {}).get(major_minor, False)
         if eol:
             self.out.add_finding(
-                title=f"End-of-Life MySQL/MariaDB Version: {ver}",
+                title=f"EOL Software: End-of-Life MySQL/MariaDB Version: {ver}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"The database is running version {ver} which is past end-of-life.",
                 output=f"VERSION(): {ver}", db_version=ver,
@@ -1026,7 +1026,7 @@ class MySQLAuditor:
         tls_req = self._var("require_secure_transport")
         if ssl_val != "yes":
             self.out.add_finding(
-                title="Cleartext Database Protocol (No TLS/SSL)",
+                title="Database: Cleartext Database Protocol (No TLS/SSL)",
                 risk="HIGH", phase="network", catalogue_id="DB-001",
                 description="MySQL SSL/TLS is not enabled.",
                 output=f"have_ssl = {ssl_val}",
@@ -1145,7 +1145,7 @@ class MySQLAuditor:
         val = self._var("bind_address")
         if val in ("0.0.0.0", "::", "*", ""):
             self.out.add_finding(
-                title="Database Listening on All Network Interfaces (0.0.0.0)",
+                title="Database: Database Listening on All Network Interfaces (0.0.0.0)",
                 risk="HIGH", phase="config", catalogue_id="DB-004",
                 description=f"MySQL bind_address={val!r} — listening on all interfaces.",
                 output=f"bind_address = {val}",
@@ -1197,7 +1197,7 @@ class MySQLAuditor:
         val = self._var("log_error")
         if val in ("", "off", "0"):
             self.out.add_finding(
-                title="Audit Logging Disabled",
+                title="Database: Audit Logging Disabled",
                 risk="HIGH", phase="logging", catalogue_id="DB-005",
                 description="MySQL error logging is disabled.",
                 output=f"log_error = {val!r}",
@@ -1334,7 +1334,7 @@ class PostgreSQLAuditor:
         eol = eol or _EOL_VERSIONS.get("postgresql", {}).get(major, False)
         if eol:
             self.out.add_finding(
-                title=f"End-of-Life PostgreSQL Version: {ver_num}",
+                title=f"EOL Software: End-of-Life PostgreSQL Version: {ver_num}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"PostgreSQL {ver_num} is end-of-life.",
                 output=ver_str, db_version=ver_num,
@@ -1370,7 +1370,7 @@ class PostgreSQLAuditor:
         val = self._setting("ssl")
         if val == "off":
             self.out.add_finding(
-                title="Cleartext Database Protocol (No TLS/SSL)",
+                title="Database: Cleartext Database Protocol (No TLS/SSL)",
                 risk="HIGH", phase="network", catalogue_id="DB-001",
                 description="PostgreSQL ssl=off — all connections are unencrypted.",
                 output="ssl = off", command="SHOW ssl",
@@ -1523,7 +1523,7 @@ class PostgreSQLAuditor:
         val = self._setting("listen_addresses")
         if val in ("*", "0.0.0.0"):
             self.out.add_finding(
-                title="Database Listening on All Network Interfaces (0.0.0.0)",
+                title="Database: Database Listening on All Network Interfaces (0.0.0.0)",
                 risk="HIGH", phase="config", catalogue_id="DB-004",
                 description=f"PostgreSQL listen_addresses={val!r}",
                 output=f"listen_addresses = {val}",
@@ -1686,7 +1686,7 @@ class MSSQLAuditor:
         yr = m.group(1) if m else ""
         if yr and _EOL_VERSIONS.get("mssql", {}).get(yr, False):
             self.out.add_finding(
-                title=f"End-of-Life MSSQL Version: SQL Server {yr}",
+                title=f"EOL Software: End-of-Life MSSQL Version: SQL Server {yr}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"SQL Server {yr} is end-of-life.",
                 output=ver[:200], db_version=yr, command="SELECT @@VERSION"
@@ -2061,7 +2061,7 @@ class MongoDBauditor:
             major_minor = ".".join(ver.split(".")[:2])
             if _EOL_VERSIONS.get("mongodb", {}).get(major_minor, False):
                 self.out.add_finding(
-                    title=f"End-of-Life MongoDB Version: {ver}",
+                    title=f"EOL Software: End-of-Life MongoDB Version: {ver}",
                     risk="CRITICAL", phase="version", catalogue_id="DB-009",
                     description=f"MongoDB {ver} is end-of-life.",
                     output=f"version={ver}", db_version=ver,
@@ -2182,7 +2182,7 @@ class MongoDBauditor:
             bind = result.get("parsed", {}).get("net", {}).get("bindIp", "127.0.0.1")
             if "0.0.0.0" in bind or bind == "":
                 self.out.add_finding(
-                    title="Database Listening on All Network Interfaces (0.0.0.0)",
+                    title="Database: Database Listening on All Network Interfaces (0.0.0.0)",
                     risk="HIGH", phase="config", catalogue_id="DB-004",
                     description=f"MongoDB net.bindIp={bind!r}",
                     output=f"net.bindIp = {bind}",
@@ -2330,7 +2330,7 @@ class RedisAuditor:
             major_minor = ".".join(ver.split(".")[:2])
             if _EOL_VERSIONS.get("redis", {}).get(major_minor, False):
                 self.out.add_finding(
-                    title=f"End-of-Life Redis Version: {ver}",
+                    title=f"EOL Software: End-of-Life Redis Version: {ver}",
                     risk="CRITICAL", phase="version", catalogue_id="DB-009",
                     description=f"Redis {ver} is end-of-life.",
                     output=f"redis_version={ver}", db_version=ver
@@ -2443,7 +2443,7 @@ class RedisAuditor:
             addr = bind.get("bind", "127.0.0.1")
             if "0.0.0.0" in addr or addr.strip() == "":
                 self.out.add_finding(
-                    title="Database Listening on All Network Interfaces (0.0.0.0)",
+                    title="Database: Database Listening on All Network Interfaces (0.0.0.0)",
                     risk="HIGH", phase="config", catalogue_id="DB-004",
                     description=f"Redis bind={addr!r}",
                     output=f"bind = {addr}",
@@ -2458,7 +2458,7 @@ class RedisAuditor:
             tls_port = self._client.config_get("tls-port")
             if not tls_port.get("tls-port") or tls_port.get("tls-port") == "0":
                 self.out.add_finding(
-                    title="Cleartext Database Protocol (No TLS/SSL)",
+                    title="Database: Cleartext Database Protocol (No TLS/SSL)",
                     risk="HIGH", phase="network", catalogue_id="DB-001",
                     description="Redis TLS is not configured (tls-port=0).",
                     output=f"tls-port = {tls_port.get('tls-port', '0')}",
@@ -2578,7 +2578,7 @@ class CassandraAuditor:
         major_minor = ".".join(ver.split(".")[:2])
         if _EOL_VERSIONS.get("cassandra", {}).get(major_minor, False):
             self.out.add_finding(
-                title=f"End-of-Life Cassandra Version: {ver}",
+                title=f"EOL Software: End-of-Life Cassandra Version: {ver}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"Cassandra {ver} is end-of-life.",
                 output=f"release_version={ver}", db_version=ver
@@ -2748,7 +2748,7 @@ class ElasticsearchAuditor:
         major_minor = ".".join(ver.split(".")[:2])
         if _EOL_VERSIONS.get("elasticsearch", {}).get(major_minor, False):
             self.out.add_finding(
-                title=f"End-of-Life Elasticsearch Version: {ver}",
+                title=f"EOL Software: End-of-Life Elasticsearch Version: {ver}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"Elasticsearch {ver} is end-of-life.",
                 output=f"version={ver}", db_version=ver
@@ -2928,7 +2928,7 @@ class OracleAuditor:
         self.out.log_step(f"Oracle version: {ver}")
         if "11g" in ver.lower() or "10g" in ver.lower():
             self.out.add_finding(
-                title=f"End-of-Life Oracle Database Version: {ver}",
+                title=f"EOL Software: End-of-Life Oracle Database Version: {ver}",
                 risk="CRITICAL", phase="version", catalogue_id="DB-009",
                 description=f"Oracle {ver} is end-of-life and no longer receives security patches.",
                 output=ver, db_version=ver,
@@ -2946,7 +2946,7 @@ class OracleAuditor:
         if rows:
             users = [r[0] for r in rows]
             self.out.add_finding(
-                title="Oracle Default Sample Schema Accounts Active",
+                title="Oracle: Oracle Default Sample Schema Accounts Active",
                 risk="HIGH", phase="auth", catalogue_id="DB-006",
                 description=f"Default Oracle schema accounts are active: {users}",
                 output=str(users), db_version=self._version,
@@ -2964,7 +2964,7 @@ class OracleAuditor:
         if rows:
             grants = [f"{r[2]} {r[1]}" for r in rows]
             self.out.add_finding(
-                title="Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
+                title="Oracle: Dangerous Oracle PUBLIC Execute Grants (UTL_FILE/DBMS_SQL etc.)",
                 risk="HIGH", phase="permissions", catalogue_id="DB-053",
                 description=f"PUBLIC execute grants on privileged packages: {grants}",
                 output=str(grants), db_version=self._version,
@@ -2975,7 +2975,7 @@ class OracleAuditor:
         row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='remote_os_authent'")
         if row and str(row[0]).upper() == "TRUE":
             self.out.add_finding(
-                title="Oracle REMOTE_OS_AUTHENT Enabled",
+                title="Oracle: Oracle REMOTE_OS_AUTHENT Enabled",
                 risk="CRITICAL", phase="config", catalogue_id="DB-051",
                 description="REMOTE_OS_AUTHENT=TRUE allows OS-level authentication bypass.",
                 output="remote_os_authent=TRUE", db_version=self._version,
@@ -2986,7 +2986,7 @@ class OracleAuditor:
         row = self._q1("SELECT VALUE FROM V$PARAMETER WHERE NAME='utl_file_dir'")
         if row and str(row[0]).strip() in ("*", "/"):
             self.out.add_finding(
-                title="Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
+                title="Oracle: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
                 risk="HIGH", phase="config", catalogue_id="DB-052",
                 description=f"UTL_FILE_DIR={row[0]} permits read/write of any OS file.",
                 output=f"utl_file_dir={row[0]}", db_version=self._version,
@@ -2998,7 +2998,7 @@ class OracleAuditor:
         val = str(row[0]).upper() if row else "NONE"
         if val in ("NONE", "FALSE"):
             self.out.add_finding(
-                title="Oracle Unified Auditing Disabled",
+                title="Oracle: Oracle Unified Auditing Disabled",
                 risk="MEDIUM", phase="config", catalogue_id="DB-054",
                 description="AUDIT_TRAIL=NONE — no audit records are generated.",
                 output=f"audit_trail={val}", db_version=self._version,
@@ -3016,7 +3016,7 @@ class OracleAuditor:
         if rows:
             privs = [f"{r[0]}:{r[1]}" for r in rows[:20]]
             self.out.add_finding(
-                title="Excessive Oracle System Privileges Granted to Non-SYS Accounts",
+                title="Oracle: Excessive Oracle System Privileges Granted to Non-SYS Accounts",
                 risk="HIGH", phase="permissions", catalogue_id="DB-055",
                 description=f"High-privilege grants: {privs}",
                 output=str(privs), db_version=self._version,
@@ -3032,7 +3032,7 @@ class OracleAuditor:
         if rows:
             users = [r[0] for r in rows]
             self.out.add_finding(
-                title="Oracle Accounts Using Weak 10g DES Password Hash",
+                title="Oracle: Oracle Accounts Using Weak 10g DES Password Hash",
                 risk="HIGH", phase="auth", catalogue_id="DB-056",
                 description=f"Accounts still using MD5/DES 10g hash: {users}",
                 output=str(users), db_version=self._version,
@@ -3045,7 +3045,7 @@ class OracleAuditor:
         )
         if rows and str(rows[0][0]).upper() != "TRUE":
             self.out.add_finding(
-                title="Oracle Label Security (OLS) Not Enabled",
+                title="Oracle: Oracle Label Security (OLS) Not Enabled",
                 risk="LOW", phase="config", catalogue_id="DB-057",
                 description="Oracle Label Security is not active — row-level access control unavailable.",
                 output="OLS_STATUS=FALSE", db_version=self._version,
@@ -3137,7 +3137,7 @@ class CouchDBAuditor:
         code, body = self._get("/_config/admins")
         if code == 200 and isinstance(body, dict) and len(body) == 0:
             self.out.add_finding(
-                title="CouchDB Admin Party Mode — No Admin Accounts Configured",
+                title="CouchDB: CouchDB Admin Party Mode — No Admin Accounts Configured",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-400",
                 description="CouchDB has no admin accounts; any request has full admin access.",
                 output="/_config/admins returned empty object",
@@ -3160,7 +3160,7 @@ class CouchDBAuditor:
         code, body = self._get("/_node/_local/_config")
         if code == 200:
             self.out.add_finding(
-                title="CouchDB Node Configuration Exposed Without Authentication",
+                title="Authentication Bypass: CouchDB Node Configuration Exposed Without Authentication",
                 risk="HIGH", phase="config", catalogue_id="DB-401",
                 description="/_node/_local/_config accessible without auth — reveals bind addresses, ports, secret keys.",
                 output=str(body)[:500], db_version=self._version,
@@ -3172,7 +3172,7 @@ class CouchDBAuditor:
             code, body = self._get("/_session", auth=(user, pwd))
             if code == 200 and body.get("ok"):
                 self.out.add_finding(
-                    title=f"CouchDB Default Credentials: {user}/{pwd}",
+                    title=f"Authentication: Default Credentials Accepted",
                     risk="CRITICAL", phase="auth", catalogue_id="DB-006",
                     description=f"Authenticated with default credentials {user}/{pwd}.",
                     output=f"user={user}", db_version=self._version,
@@ -3245,7 +3245,7 @@ class InfluxDBAuditor:
         code, body = self._get("/api/v2/setup")
         if code == 200 and not body.get("allowed", True):
             self.out.add_finding(
-                title="InfluxDB 2.x Initial Setup Not Completed",
+                title="InfluxDB: InfluxDB 2.x Initial Setup Not Completed",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-420",
                 description="InfluxDB setup endpoint indicates initial admin setup has not been completed.",
                 output=str(body)[:300], db_version=self._version,
@@ -3256,7 +3256,7 @@ class InfluxDBAuditor:
         code, body = self._get("/api/v2/authorizations")
         if code == 200:
             self.out.add_finding(
-                title="InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
+                title="InfluxDB: InfluxDB 2.x: Authorizations Endpoint Accessible Without Token",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-450",
                 description="Token authorizations accessible without authentication.",
                 output=str(body)[:300], db_version=self._version,
@@ -3268,7 +3268,7 @@ class InfluxDBAuditor:
         if code == 200 and "buckets" in body:
             buckets = [b.get("name", "") for b in body.get("buckets", [])]
             self.out.add_finding(
-                title="InfluxDB 2.x Buckets Exposed Without Authentication",
+                title="Authentication Bypass: InfluxDB 2.x Buckets Exposed Without Authentication",
                 risk="HIGH", phase="permissions", catalogue_id="DB-421",
                 description=f"Bucket listing accessible without token: {buckets[:10]}",
                 output=str(buckets[:10]), db_version=self._version,
@@ -3369,7 +3369,7 @@ class Neo4jAuditor:
         auth_val = str(config.get("dbms.security.auth_enabled", "true")).lower()
         if auth_val in ("false", "0", "no"):
             self.out.add_finding(
-                title="Neo4j Authentication Disabled (dbms.security.auth_enabled=false)",
+                title="Authentication Bypass: Neo4j Authentication Disabled (dbms.security.auth_enabled=false)",
                 risk="CRITICAL", phase="auth", catalogue_id="DB-430",
                 description="dbms.security.auth_enabled=false — all connections are unauthenticated.",
                 output=f"auth_enabled={auth_val}", db_version=self._version,
@@ -3434,7 +3434,7 @@ class Neo4jAuditor:
             roles = row.get("rolesExecution") or []
             if name in dangerous and (not roles or "PUBLIC" in roles):
                 self.out.add_finding(
-                    title=f"Neo4j Dangerous Procedure Publicly Accessible: {name}",
+                    title=f"Neo4j: Neo4j Dangerous Procedure Publicly Accessible: {name}",
                     risk="HIGH", phase="permissions", catalogue_id="DB-432",
                     description=f"Procedure '{name}' callable by PUBLIC role — may allow code execution or privilege escalation.",
                     output=f"procedure={name} roles={roles}", db_version=self._version,
@@ -4057,7 +4057,7 @@ def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
     else:
         if tls.get("weak_version"):
             out.add_finding(
-                title="Weak TLS Version (TLS 1.0 or TLS 1.1)",
+                title="Insecure Protocol Detected: Weak TLS Version (TLS 1.0 or TLS 1.1)",
                 risk="MEDIUM", phase="network", catalogue_id="DB-002",
                 description=f"Database negotiated {tls['version']} which is deprecated.",
                 output=f"TLS version={tls['version']} cipher={tls['cipher']}",
@@ -4065,7 +4065,7 @@ def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
             )
         if tls.get("weak_cipher"):
             out.add_finding(
-                title="Weak Cipher Suites Accepted",
+                title="SSL/TLS Ciphers: Weak Cipher Suites Accepted",
                 risk="MEDIUM", phase="network", catalogue_id="DB-017",
                 description=f"Weak cipher suite negotiated: {tls['cipher']}",
                 output=f"cipher={tls['cipher']} version={tls['version']}",
@@ -4073,7 +4073,7 @@ def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
             )
         if tls.get("self_signed"):
             out.add_finding(
-                title="Self-Signed or Expired TLS Certificate",
+                title="SSL/TLS Certificate: Self-Signed or Expired TLS Certificate",
                 risk="MEDIUM", phase="network", catalogue_id="DB-003",
                 description=f"Self-signed certificate: subject={tls['cert_subject']} issuer={tls['cert_issuer']}",
                 output=f"subject={tls['cert_subject']} issuer={tls['cert_issuer']}",
@@ -4081,7 +4081,7 @@ def run_network_phase(host: str, port: int, out: AugerOutput) -> None:
             )
         if tls.get("cert_expired"):
             out.add_finding(
-                title="Expired TLS Certificate",
+                title="SSL/TLS Certificate: Expired TLS Certificate",
                 risk="MEDIUM", phase="network", catalogue_id="DB-003",
                 description="The database TLS certificate has expired.",
                 output=f"cert_subject={tls['cert_subject']}",
