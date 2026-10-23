@@ -430,6 +430,7 @@ class AugerOutput:
         ts = self._ts()
         # Enrich from catalogue
         cat = _CATALOGUE.get(catalogue_id, {})
+        if not risk and cat:        risk        = cat.get("risk", "")
         if not owasp and cat:       owasp       = cat.get("owasp", "")
         if not owasp_asvs and cat:  owasp_asvs  = cat.get("owasp_asvs", "")
         if not iso_27001 and cat:   iso_27001   = cat.get("iso_27001", "")

@@ -13,7 +13,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -52,7 +52,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -91,7 +91,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -130,7 +130,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -169,7 +169,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -208,7 +208,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -247,7 +247,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -286,7 +286,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -325,7 +325,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -364,7 +364,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -403,7 +403,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -442,7 +442,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -481,7 +481,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -520,7 +520,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -559,7 +559,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -598,7 +598,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -637,7 +637,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -676,7 +676,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -715,7 +715,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -754,7 +754,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -793,7 +793,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -832,7 +832,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -871,7 +871,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -910,7 +910,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -949,7 +949,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -988,7 +988,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1027,7 +1027,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1066,7 +1066,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1105,7 +1105,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1144,7 +1144,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1183,7 +1183,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1222,7 +1222,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1261,7 +1261,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1300,7 +1300,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1339,7 +1339,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1378,7 +1378,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1417,7 +1417,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "CRITICAL",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1456,7 +1456,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1495,7 +1495,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1534,7 +1534,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1573,7 +1573,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1612,7 +1612,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1651,7 +1651,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1690,7 +1690,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1729,7 +1729,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1768,7 +1768,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1807,7 +1807,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1846,7 +1846,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "CRITICAL",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1885,7 +1885,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1924,7 +1924,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "CRITICAL",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -1963,7 +1963,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2002,7 +2002,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2041,7 +2041,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2080,7 +2080,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2119,7 +2119,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2158,7 +2158,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2197,7 +2197,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2236,7 +2236,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2275,7 +2275,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2314,7 +2314,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2353,7 +2353,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2392,7 +2392,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2431,7 +2431,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2470,7 +2470,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "INFO",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2509,7 +2509,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2548,7 +2548,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2587,7 +2587,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2626,7 +2626,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2665,7 +2665,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2704,7 +2704,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2743,7 +2743,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2782,7 +2782,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2821,7 +2821,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2860,7 +2860,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2899,7 +2899,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2938,7 +2938,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -2977,7 +2977,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3016,7 +3016,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3055,7 +3055,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3094,7 +3094,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "CRITICAL",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3133,7 +3133,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "HIGH",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3172,7 +3172,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3211,7 +3211,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3250,7 +3250,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "MEDIUM",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
@@ -3289,7 +3289,7 @@
       "source_tools": [
         "auger"
       ],
-      "risk": "",
+      "risk": "LOW",
       "cwe": [],
       "cve_examples": [],
       "cvss_v3_base": null,
