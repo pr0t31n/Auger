@@ -40,7 +40,8 @@ _CP_LOG    = "__CRUCIBLE_LOG__:"
 _CP_ERR    = "__CRUCIBLE_ERR__:"
 _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
 _CP_STATUS = "__CRUCIBLE_STATUS__:"
-_CP_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
+_CP_ACTION  = "__CRUCIBLE_ACTION_ITEM__:"
+_CP_FINDING = "__CRUCIBLE_FINDING__:"
 
 try:
     if "/opt/pr0t31n/shared" not in sys.path:
@@ -527,6 +528,19 @@ class AugerOutput:
                 with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                     w = csv.DictWriter(f, fieldnames=FINDINGS_CSV_FIELDS, extrasaction="ignore")
                     w.writerow(entry)
+            except Exception:
+                pass
+        if _CRUCIBLE_MANAGED:
+            try:
+                print(_CP_FINDING + json.dumps({
+                    "title": title, "ip": self.host, "port": self.port,
+                    "hostname": self.host, "risk": risk.upper(),
+                    "description": description or "",
+                    "sources": sources or "", "service": self.db_type or "",
+                    "affected": f"{self.host}:{self.port}",
+                    "cves": cves or "", "remediation": remediation or "",
+                    "catalogue_id": catalogue_id or "",
+                }, ensure_ascii=False), flush=True)
             except Exception:
                 pass
         _console.log(
