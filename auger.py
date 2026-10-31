@@ -367,6 +367,17 @@ class AugerOutput:
         self._seen_keys: set = set()
         self._action_items: list = []
         self._ai_seen: set = set()
+        self._fdb = None
+        _db_path = os.environ.get("PR0T31N_FINDINGS_DB")
+        if _db_path:
+            try:
+                import sys as _s
+                if "/opt/pr0t31n/shared" not in _s.path:
+                    _s.path.insert(0, "/opt/pr0t31n/shared")
+                import pr0t31n_findings_db
+                self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
+            except Exception:
+                self._fdb = None
         self._setup()
 
     def _setup(self) -> None:
@@ -524,6 +535,11 @@ class AugerOutput:
             existing.append(entry)
             self.findings_json.write_text(json.dumps(existing, indent=2, ensure_ascii=False),
                                            encoding="utf-8")
+            if self._fdb:
+                try:
+                    self._fdb.insert_finding(entry)
+                except Exception:
+                    pass
             try:
                 with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                     w = csv.DictWriter(f, fieldnames=FINDINGS_CSV_FIELDS, extrasaction="ignore")
