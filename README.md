@@ -54,12 +54,13 @@ Auger is a read-only, authenticated database security auditor for the pr0t31n to
 
 ## Features
 
-- **Multi-engine support**: MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, MongoDB, Redis, Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, AWS Redshift, AWS DynamoDB
+- **Multi-engine support**: MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, MongoDB, Redis, Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, AWS Redshift, AWS DynamoDB, AWS RDS, Milvus, Qdrant, Weaviate, ChromaDB, pgvector, SQLite, H2
+- **File-based analysis**: audit local SQLite databases, SQL dump files, Redis RDB snapshots, and H2 database files without a running server
 - **Read-only**: zero writes, zero config changes — all checks use SELECT/SHOW/GET
 - **False-positive prevention**: every finding is confirmed before reporting; ambiguous findings are flagged with `validation_required=true` and specific validation commands
 - **Compliance mappings per finding**: OWASP ASVS 4.0, ISO 27001:2022, PCI DSS v4.0, HIPAA §164, NIST SP 800-53
 - **Oracle Label Security (OLS)** and **Row-Level Security (RLS)** checks for Oracle and PostgreSQL
-- **CVE database**: offline per-engine CVE tables with CVSS scores
+- **CVE database**: offline per-engine CVE tables with CVSS scores; `--update-cves` fetches the latest from NVD before audit
 - **Default credentials check**: probes known default username/password pairs per engine
 - **Sensitive column detection**: scans `information_schema` for PII/PHI/PCI column names
 - **TLS/SSL inspection**: version, cipher suite, certificate expiry, self-signed detection
@@ -114,6 +115,28 @@ python3 auger.py --host 192.168.1.50 --db-type redis -P mypassword
 
 # Elasticsearch
 python3 auger.py --host 192.168.1.60 --db-type elasticsearch -U elastic -P password
+
+# Vector DB (Milvus)
+python3 auger.py --host 192.168.1.70 --db-type milvus
+
+# Vector DB (Qdrant with API key)
+python3 auger.py --host 192.168.1.80 --db-type qdrant -P my-api-key
+```
+
+### Local file analysis
+
+```bash
+# SQLite database file
+python3 auger.py --db-file /path/to/app.db --db-type sqlite
+
+# SQL dump file
+python3 auger.py --db-file /path/to/backup.sql --db-type sqldump
+
+# Redis RDB snapshot
+python3 auger.py --db-file /path/to/dump.rdb --db-type redis_rdb
+
+# H2 database file
+python3 auger.py --db-file /path/to/data.mv.db --db-type h2
 ```
 
 ### JDBC connection string
@@ -144,29 +167,33 @@ python3 auger.py --host 192.168.1.10 --db-type mysql -U root -P password \
 
 ---
 
-## CLI Flags
+## CLI Reference
 
-| Flag | Description |
-|------|-------------|
-| `--settings FILE` | Load all settings from a JSON file (Crucible mode) |
-| `--host HOST` | Target hostname or IP |
-| `--port PORT` | Target port (default: per DB type) |
-| `--db-type TYPE` | Database type (see supported list below) |
-| `-U, --username` | Database username |
-| `-P, --password` | Database password |
-| `--database NAME` | Database/schema name to audit |
-| `--jdbc URL` | JDBC connection string (overrides host/port/type) |
-| `--auth-type TYPE` | Auth type: `password`, `kerberos`, `ldap`, `iam` |
-| `--ssl` | Enable SSL/TLS for the connection |
-| `--ssl-ca FILE` | CA certificate path |
-| `--ssl-cert FILE` | Client certificate path |
-| `--ssl-key FILE` | Client key path |
-| `--ssl-verify` | Verify SSL certificate (default: False) |
-| `--aws-profile NAME` | AWS profile for IAM auth (Redshift/DynamoDB) |
-| `--aws-region REGION` | AWS region |
-| `--timeout SECS` | Connection timeout in seconds (default: 10) |
-| `--threads N` | Worker threads for parallel checks (default: 4) |
-| `--project DIR` | Output directory for findings |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--settings FILE` | — | Load all settings from a JSON file (Crucible mode) |
+| `--host HOST` | — | Target hostname or IP |
+| `--db-file PATH` | — | Local database file to analyze (SQLite, SQL dump, Redis RDB, H2) |
+| `--port PORT` | per DB type | Target port |
+| `--db-type TYPE` | — | Database type (see supported list below) |
+| `-U, --username USER` | (empty) | Database username |
+| `-P, --password PASS` | (empty) | Database password |
+| `--database NAME` | (empty) | Database/schema name to audit |
+| `--jdbc URL` | (empty) | JDBC connection string (overrides host/port/type) |
+| `--auth-type TYPE` | `password` | Auth type: `password`, `ssl`, `kerberos`, `ldap`, `iam` |
+| `--ssl` | off | Enable SSL/TLS for the connection |
+| `--ssl-ca FILE` | (empty) | CA certificate path |
+| `--ssl-cert FILE` | (empty) | Client certificate path |
+| `--ssl-key FILE` | (empty) | Client key path |
+| `--ssl-verify` | off | Verify SSL certificate |
+| `--aws-profile NAME` | (empty) | AWS profile for IAM auth (Redshift/DynamoDB/RDS) |
+| `--aws-region REGION` | (empty) | AWS region |
+| `--timeout SECS` | `10` | Connection timeout in seconds |
+| `--threads N` | `4` | Worker threads for parallel checks |
+| `--project DIR` | `auger_output` | Output directory for findings |
+| `--cred-delay SECS` | `0.5` | Seconds to pause between credential attempts |
+| `--update-cves` | off | Fetch latest CVEs from NVD before audit |
+| `--version` | — | Print version and exit |
 
 ---
 
@@ -176,19 +203,29 @@ python3 auger.py --host 192.168.1.10 --db-type mysql -U root -P password \
 |----------|--------|
 | `mysql` | MySQL 5.x, 8.x |
 | `mariadb` | MariaDB 10.x |
-| `postgresql` | PostgreSQL 12–17 |
-| `mssql` | Microsoft SQL Server 2012–2022 |
-| `oracle` | Oracle Database 11g–21c |
-| `mongodb` | MongoDB 4.x–7.x |
-| `redis` | Redis 5.x–7.x |
-| `cassandra` | Apache Cassandra 3.x–5.x |
-| `elasticsearch` | Elasticsearch 7.x–8.x |
+| `postgresql` | PostgreSQL 12-17 (alias: `postgres`) |
+| `mssql` | Microsoft SQL Server 2012-2022 |
+| `oracle` | Oracle Database 11g-21c |
+| `mongodb` | MongoDB 4.x-7.x |
+| `redis` | Redis 5.x-7.x |
+| `cassandra` | Apache Cassandra 3.x-5.x |
+| `elasticsearch` | Elasticsearch 7.x-8.x (aliases: `elastic`, `es`) |
 | `couchdb` | Apache CouchDB 3.x |
 | `influxdb` | InfluxDB 2.x |
-| `neo4j` | Neo4j 4.x–5.x |
+| `neo4j` | Neo4j 4.x-5.x |
 | `memcached` | Memcached 1.6.x |
 | `redshift` | AWS Redshift |
 | `dynamodb` | AWS DynamoDB |
+| `rds` | AWS RDS (auto-detects underlying engine) |
+| `milvus` | Milvus vector database |
+| `qdrant` | Qdrant vector database |
+| `weaviate` | Weaviate vector database |
+| `chromadb` | ChromaDB vector database (alias: `chroma`) |
+| `pgvector` | PostgreSQL with pgvector extension |
+| `sqlite` | SQLite (local file via `--db-file`) |
+| `sqldump` | SQL dump file analysis (local file via `--db-file`) |
+| `redis_rdb` | Redis RDB snapshot analysis (local file via `--db-file`) |
+| `h2` | H2 database (local file via `--db-file`) |
 
 ---
 
