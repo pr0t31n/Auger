@@ -49,6 +49,9 @@ Auger is a read-only, authenticated database security auditor for the pr0t31n to
 
 ---
 
+
+> **[View full documentation on the Codex Wiki](https://wiki.pr0t31n.com/tools/auger)** — detailed features, CLI reference, findings catalogue, and integration guides.
+
 ## Features
 
 - **Multi-engine support**: MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, MongoDB, Redis, Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, AWS Redshift, AWS DynamoDB
