@@ -4,8 +4,9 @@ auger.py — Database Security Auditor
 
 Performs comprehensive authenticated security audits of network-accessible
 databases: MySQL/MariaDB, PostgreSQL, MSSQL, Oracle, MongoDB, Redis,
-Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, and AWS
-managed databases (RDS, DynamoDB, Redshift).
+Cassandra, Elasticsearch, CouchDB, InfluxDB, Neo4j, Memcached, AWS
+managed databases (RDS, DynamoDB, Redshift), and vector databases
+(Milvus, Qdrant, Weaviate, ChromaDB, pgvector).
 
 Does NOT modify the database in any way.
 Accepts Crucible as a management console.
@@ -192,6 +193,11 @@ _DEFAULT_CREDS = {
     "influxdb":      [("admin", "admin"), ("admin", "password"), ("influxdb", "influxdb"),
                       ("root", "root")],
     "neo4j":         [("neo4j", "neo4j"), ("neo4j", "password"), ("admin", "admin")],
+    "milvus":        [("root", "Milvus"), ("root", ""), ("root", "root"), ("root", "password")],
+    "qdrant":        [],  # API-key based, no user/pass defaults
+    "weaviate":      [],  # API-key or anonymous
+    "chromadb":      [],  # No auth by default
+    "pgvector":      [],  # Uses PostgreSQL credentials (handled by PostgreSQLAuditor)
 }
 
 # ---------------------------------------------------------------------------
@@ -770,6 +776,8 @@ def _default_port(db_type: str) -> int:
         "cassandra": 9042, "elasticsearch": 9200, "couchdb": 5984,
         "influxdb": 8086, "neo4j": 7474, "memcached": 11211,
         "redshift": 5439, "dynamodb": 8000,
+        "milvus": 19530, "qdrant": 6333, "weaviate": 8080,
+        "chromadb": 8000, "pgvector": 5432,
     }
     return _ports.get(db_type, 0)
 
@@ -4780,6 +4788,11 @@ def run_audit(cfg: dict) -> int:
         "neo4j": "neo4j",
         "memcached": "memcached",
         "redshift": "redshift",
+        "milvus": "milvus",
+        "qdrant": "qdrant",
+        "weaviate": "weaviate",
+        "chromadb": "chromadb", "chroma": "chromadb",
+        "pgvector": "pgvector",
     }
     db_type = _aliases.get(db_type, db_type)
 
@@ -4884,6 +4897,14 @@ def run_audit(cfg: dict) -> int:
             enumerate_schema_pg(auditor._conn, out, db_version)
             extra = auditor.run(db_version)
             phases_run.extend(extra)
+            # pgvector extension checks (if applicable)
+            pgv = PgvectorAuditor(host, port, username, password, database, out,
+                                  ssl_enabled=ssl_en, timeout=timeout,
+                                  pg_conn=auditor._conn)
+            if pgv._has_pgvector():
+                _console.log("pgvector extension detected — running vector DB checks", "INFO")
+                pgv_extra = pgv.run(db_version)
+                phases_run.extend(pgv_extra)
             auditor._conn.close()
         else:
             _console.error("PostgreSQL authentication failed.")
@@ -5074,6 +5095,65 @@ def run_audit(cfg: dict) -> int:
             auditor.close()
         else:
             _console.error("RDS connect failed (check AWS credentials / region).")
+
+    elif db_type == "milvus":
+        auditor = MilvusAuditor(host, port, username, password, out,
+                                ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            phases_run.extend(extra)
+        else:
+            _console.error("Milvus connection failed.")
+
+    elif db_type == "qdrant":
+        auditor = QdrantAuditor(host, port, password, out,
+                                ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            phases_run.extend(extra)
+        else:
+            _console.error("Qdrant connection failed.")
+
+    elif db_type == "weaviate":
+        auditor = WeaviateAuditor(host, port, password, out,
+                                  ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            phases_run.extend(extra)
+        else:
+            _console.error("Weaviate connection failed.")
+
+    elif db_type == "chromadb":
+        auditor = ChromaDBAuditor(host, port, out,
+                                  ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            extra = auditor.run("")
+            phases_run.extend(extra)
+        else:
+            _console.error("ChromaDB connection failed.")
+
+    elif db_type == "pgvector":
+        # pgvector uses PostgreSQL wire protocol
+        auditor = PostgreSQLAuditor(host, port, username, password, database, out,
+                                    ssl_enabled=ssl_en, timeout=timeout)
+        if auditor.connect():
+            auth_success = True
+            db_version = auditor.check_version()
+            pgv = PgvectorAuditor(host, port, username, password, database, out,
+                                  ssl_enabled=ssl_en, timeout=timeout,
+                                  pg_conn=auditor._conn)
+            if pgv._has_pgvector():
+                extra = pgv.run(db_version)
+                phases_run.extend(extra)
+            else:
+                _console.log("pgvector extension not found on this PostgreSQL instance", "WARNING")
+            auditor._conn.close()
+        else:
+            _console.error("PostgreSQL authentication failed.")
 
     else:
         _console.error(f"Database type '{db_type}' not supported.")
@@ -5668,6 +5748,455 @@ def _fa_h2(fp: Path, out: AugerOutput) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Milvus Auditor  (REST API — vector DB)
+# ---------------------------------------------------------------------------
+class MilvusAuditor:
+    def __init__(self, host, port, username, password, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._version = ""
+        self._base_url = f"{'https' if ssl_enabled else 'http'}://{host}:{port}"
+
+    def _request(self, method: str, path: str, body: dict = None,
+                 auth: tuple = None) -> tuple:
+        import urllib.request, urllib.error
+        url = self._base_url + path
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if auth and auth[0]:
+            import base64
+            tok = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+            req.add_header("Authorization", f"Basic {tok}")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None)
+            return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._request("POST", "/v2/vectordb/collections/list", body={})
+        if code == 200 and "_error" not in body:
+            return True
+        # Fall back to unauthenticated GET for older Milvus versions
+        code2, body2 = self._request("GET", "/v2/vectordb/collections/list")
+        return code2 == 200 and "_error" not in body2
+
+    def check_unauth_access(self):
+        code, body = self._request("POST", "/v2/vectordb/collections/list", body={})
+        if code != 200:
+            code, body = self._request("GET", "/v2/vectordb/collections/list")
+        if code == 200 and "_error" not in body:
+            collections = body.get("data", [])
+            self.out.add_finding(
+                title="Milvus Unauthenticated Access",
+                risk="HIGH", phase="auth", catalogue_id="AU-VDB-001",
+                description=(
+                    "Milvus vector database is accessible without authentication. "
+                    f"Collections enumerable: {len(collections) if isinstance(collections, list) else 'unknown'}. "
+                    "An attacker can read, modify, or delete vector embeddings and metadata."),
+                output=json.dumps(body)[:500],
+                command=f"curl -s {self._base_url}/v2/vectordb/collections/list",
+                owasp="A01:2021", nist="AC-3",
+            )
+
+    def check_default_password(self):
+        for user, pwd in _DEFAULT_CREDS.get("milvus", []):
+            if user == self.username and pwd == self.password:
+                continue
+            code, body = self._request(
+                "POST", "/v2/vectordb/collections/list",
+                body={}, auth=(user, pwd))
+            if code == 200 and "_error" not in body:
+                self.out.add_finding(
+                    title="Milvus Default/Weak Root Password",
+                    risk="CRITICAL", phase="auth", catalogue_id="AU-VDB-002",
+                    description=(
+                        f"Milvus accepts default credentials {user}/{'***' if pwd else '(empty)'}. "
+                        "The default root password 'Milvus' ships with every installation. "
+                        "An attacker with these credentials has full administrative control."),
+                    output=f"user={user}",
+                    command=f"curl -u {user}:*** {self._base_url}/v2/vectordb/collections/list",
+                    owasp="A07:2021", nist="IA-5",
+                )
+                break
+
+    def run(self, db_version: str) -> list:
+        return _run_checks("Milvus", self.host, self.port, [
+            (self.check_unauth_access, "auth"),
+            (self.check_default_password, "auth"),
+        ], self.out)
+
+
+# ---------------------------------------------------------------------------
+# Qdrant Auditor  (REST API — vector DB)
+# ---------------------------------------------------------------------------
+class QdrantAuditor:
+    def __init__(self, host, port, api_key, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host    = host
+        self.port    = port
+        self.api_key = api_key
+        self.out     = out
+        self.ssl_en  = ssl_enabled
+        self.timeout = timeout
+        self._version = ""
+        self._base_url = f"{'https' if ssl_enabled else 'http'}://{host}:{port}"
+
+    def _get(self, path: str, use_key: bool = True) -> tuple:
+        import urllib.request, urllib.error
+        url = self._base_url + path
+        req = urllib.request.Request(url)
+        if use_key and self.api_key:
+            req.add_header("api-key", self.api_key)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None)
+            return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._get("/")
+        return code == 200 and "_error" not in body
+
+    def check_unauth_api(self):
+        code, body = self._get("/collections", use_key=False)
+        if code == 200 and "_error" not in body:
+            collections = body.get("result", {}).get("collections", [])
+            self.out.add_finding(
+                title="Qdrant API Unauthenticated Access",
+                risk="HIGH", phase="auth", catalogue_id="AU-VDB-003",
+                description=(
+                    "Qdrant vector database REST API is accessible without an API key. "
+                    f"Collections visible: {len(collections)}. "
+                    "An attacker can query, modify, or delete all stored vectors and payloads."),
+                output=json.dumps(body)[:500],
+                command=f"curl -s {self._base_url}/collections",
+                owasp="A01:2021", nist="AC-3",
+            )
+
+    def check_collection_exposure(self):
+        code, body = self._get("/collections")
+        if code != 200:
+            return
+        collections = body.get("result", {}).get("collections", [])
+        if not collections:
+            return
+        names = [c.get("name", "") for c in collections]
+        self.out.add_finding(
+            title="Qdrant Collection Data Exposure",
+            risk="MEDIUM", phase="permissions", catalogue_id="AU-VDB-004",
+            description=(
+                f"All {len(names)} Qdrant collections are listable and readable. "
+                f"Collection names: {', '.join(names[:10])}. "
+                "Stored vector embeddings may encode sensitive data from documents, "
+                "user queries, or proprietary models."),
+            output=json.dumps(names[:20])[:500],
+            command=f"curl -s {self._base_url}/collections",
+            owasp="A01:2021", nist="AC-3",
+        )
+
+    def run(self, db_version: str) -> list:
+        return _run_checks("Qdrant", self.host, self.port, [
+            (self.check_unauth_api, "auth"),
+            (self.check_collection_exposure, "permissions"),
+        ], self.out)
+
+
+# ---------------------------------------------------------------------------
+# Weaviate Auditor  (REST API — vector DB)
+# ---------------------------------------------------------------------------
+class WeaviateAuditor:
+    def __init__(self, host, port, api_key, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host    = host
+        self.port    = port
+        self.api_key = api_key
+        self.out     = out
+        self.ssl_en  = ssl_enabled
+        self.timeout = timeout
+        self._version = ""
+        self._base_url = f"{'https' if ssl_enabled else 'http'}://{host}:{port}"
+
+    def _get(self, path: str, use_key: bool = True) -> tuple:
+        import urllib.request, urllib.error
+        url = self._base_url + path
+        req = urllib.request.Request(url)
+        if use_key and self.api_key:
+            req.add_header("Authorization", f"Bearer {self.api_key}")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None)
+            return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._get("/v1/meta")
+        if code == 200 and "_error" not in body:
+            self._version = body.get("version", "")
+            return True
+        return False
+
+    def check_anonymous_access(self):
+        code, body = self._get("/v1/schema", use_key=False)
+        if code == 200 and "_error" not in body:
+            classes = body.get("classes", [])
+            self.out.add_finding(
+                title="Weaviate Anonymous Access Enabled",
+                risk="HIGH", phase="auth", catalogue_id="AU-VDB-005",
+                description=(
+                    "Weaviate schema endpoint is accessible without authentication. "
+                    f"Classes visible: {len(classes)}. "
+                    "Anonymous access allows reading and writing objects, vectors, "
+                    "and schema definitions without credentials."),
+                output=json.dumps(body)[:500],
+                command=f"curl -s {self._base_url}/v1/schema",
+                owasp="A01:2021", nist="AC-3",
+                db_version=self._version,
+            )
+
+    def check_backup_api(self):
+        code, body = self._get("/v1/backups", use_key=False)
+        if code == 200 and "_error" not in body:
+            self.out.add_finding(
+                title="Weaviate Backup API Exposed",
+                risk="MEDIUM", phase="config", catalogue_id="AU-VDB-006",
+                description=(
+                    "Weaviate backup API endpoint is accessible without authentication. "
+                    "An attacker could create or restore backups to exfiltrate the entire "
+                    "database or overwrite it with attacker-controlled data."),
+                output=json.dumps(body)[:500],
+                command=f"curl -s {self._base_url}/v1/backups",
+                owasp="A05:2021", nist="CP-9",
+                db_version=self._version,
+            )
+
+    def run(self, db_version: str) -> list:
+        return _run_checks("Weaviate", self.host, self.port, [
+            (self.check_anonymous_access, "auth"),
+            (self.check_backup_api, "config"),
+        ], self.out)
+
+
+# ---------------------------------------------------------------------------
+# ChromaDB Auditor  (REST API — vector DB)
+# ---------------------------------------------------------------------------
+class ChromaDBAuditor:
+    def __init__(self, host, port, out: AugerOutput,
+                 ssl_enabled=False, timeout=10):
+        self.host    = host
+        self.port    = port
+        self.out     = out
+        self.ssl_en  = ssl_enabled
+        self.timeout = timeout
+        self._version = ""
+        self._base_url = f"{'https' if ssl_enabled else 'http'}://{host}:{port}"
+
+    def _get(self, path: str) -> tuple:
+        import urllib.request, urllib.error
+        url = self._base_url + path
+        req = urllib.request.Request(url)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            resp = urllib.request.urlopen(
+                req, timeout=self.timeout,
+                context=ctx if self.ssl_en else None)
+            return resp.getcode(), json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read())
+            except Exception:
+                return e.code, {}
+        except Exception as e:
+            return 0, {"_error": str(e)}
+
+    def connect(self) -> bool:
+        code, body = self._get("/api/v1/heartbeat")
+        if code == 200 and "_error" not in body:
+            return True
+        # Try v2 API path as fallback
+        code2, body2 = self._get("/api/v2/heartbeat")
+        return code2 == 200 and "_error" not in body2
+
+    def check_unauth_access(self):
+        code, body = self._get("/api/v1/collections")
+        if code != 200:
+            code, body = self._get("/api/v2/collections")
+        if code == 200 and "_error" not in body:
+            count = len(body) if isinstance(body, list) else 0
+            self.out.add_finding(
+                title="ChromaDB Unauthenticated Access",
+                risk="HIGH", phase="auth", catalogue_id="AU-VDB-007",
+                description=(
+                    "ChromaDB REST API is accessible without authentication. "
+                    f"Collections visible: {count}. "
+                    "By default ChromaDB ships with no authentication. "
+                    "An attacker can read, add, update, or delete all collections and embeddings."),
+                output=json.dumps(body)[:500] if body else "",
+                command=f"curl -s {self._base_url}/api/v1/collections",
+                owasp="A01:2021", nist="AC-3",
+            )
+
+    def check_collection_enum(self):
+        code, body = self._get("/api/v1/collections")
+        if code != 200:
+            code, body = self._get("/api/v2/collections")
+        if code != 200 or not isinstance(body, list) or not body:
+            return
+        names = [c.get("name", str(c)) if isinstance(c, dict) else str(c)
+                 for c in body]
+        self.out.add_finding(
+            title="ChromaDB Collection Enumeration",
+            risk="MEDIUM", phase="permissions", catalogue_id="AU-VDB-008",
+            description=(
+                f"All {len(names)} ChromaDB collections are enumerable. "
+                f"Collection names: {', '.join(names[:10])}. "
+                "Stored embeddings may encode sensitive document content, user queries, "
+                "or proprietary model outputs used in RAG pipelines."),
+            output=json.dumps(names[:20])[:500],
+            command=f"curl -s {self._base_url}/api/v1/collections",
+            owasp="A01:2021", nist="AC-3",
+        )
+
+    def run(self, db_version: str) -> list:
+        return _run_checks("ChromaDB", self.host, self.port, [
+            (self.check_unauth_access, "auth"),
+            (self.check_collection_enum, "permissions"),
+        ], self.out)
+
+
+# ---------------------------------------------------------------------------
+# pgvector Auditor  (PostgreSQL extension — vector DB)
+# ---------------------------------------------------------------------------
+class PgvectorAuditor:
+    def __init__(self, host, port, username, password, database, out: AugerOutput,
+                 ssl_enabled=False, timeout=10, pg_conn=None):
+        self.host     = host
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.database = database
+        self.out      = out
+        self.ssl_en   = ssl_enabled
+        self.timeout  = timeout
+        self._conn    = pg_conn
+        self._has_ext = None
+
+    def _has_pgvector(self) -> bool:
+        if self._has_ext is not None:
+            return self._has_ext
+        if not self._conn:
+            self._has_ext = False
+            return False
+        try:
+            cur = self._conn.cursor()
+            cur.execute("SELECT extname, extversion FROM pg_extension WHERE extname = 'vector'")
+            row = cur.fetchone()
+            cur.close()
+            self._has_ext = row is not None
+            return self._has_ext
+        except Exception:
+            self._has_ext = False
+            return False
+
+    def check_pgvector_public(self):
+        if not self._has_pgvector():
+            return
+        self.out.add_finding(
+            title="pgvector Extension Publicly Accessible",
+            risk="MEDIUM", phase="config", catalogue_id="AU-VDB-009",
+            description=(
+                "The pgvector extension is installed on a network-accessible PostgreSQL "
+                "instance. This enables vector similarity search (cosine, L2, inner product) "
+                "on stored embeddings. If the database is reachable from untrusted networks, "
+                "attackers could query vector data to reconstruct sensitive source documents."),
+            output="pgvector extension detected in pg_extension",
+            command="SELECT extname, extversion FROM pg_extension WHERE extname = 'vector'",
+            owasp="A05:2021", nist="AC-3",
+        )
+
+    def check_embedding_exposure(self):
+        if not self._has_pgvector():
+            return
+        if not self._conn:
+            return
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT table_schema, table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE data_type = 'USER-DEFINED' AND udt_name = 'vector' "
+                "ORDER BY table_schema, table_name")
+            rows = cur.fetchall()
+            cur.close()
+            if not rows:
+                return
+            tables = [f"{r[0]}.{r[1]}.{r[2]}" for r in rows]
+            self.out.add_finding(
+                title="pgvector Embedding Data Exposure",
+                risk="MEDIUM", phase="permissions", catalogue_id="AU-VDB-010",
+                description=(
+                    f"Found {len(rows)} vector column(s) across PostgreSQL tables: "
+                    f"{', '.join(tables[:10])}. "
+                    "These columns store embedding vectors that may encode sensitive data "
+                    "from documents, user inputs, or proprietary models. No column-level "
+                    "access control restricts who can SELECT these vectors."),
+                output=json.dumps(tables[:20])[:500],
+                command=(
+                    "SELECT table_schema, table_name, column_name "
+                    "FROM information_schema.columns "
+                    "WHERE data_type = 'USER-DEFINED' AND udt_name = 'vector'"),
+                owasp="A01:2021", nist="AC-3",
+            )
+        except Exception as exc:
+            self.out.log_error("pgvector", f"Embedding column scan error: {exc}")
+
+    def run(self, db_version: str) -> list:
+        return _run_checks("pgvector", self.host, self.port, [
+            (self.check_pgvector_public, "config"),
+            (self.check_embedding_exposure, "permissions"),
+        ], self.out)
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 def _parse_args() -> argparse.Namespace:
@@ -5679,6 +6208,7 @@ def _parse_args() -> argparse.Namespace:
 Supported database types:
   mysql, mariadb, postgresql, mssql, oracle, mongodb, redis,
   cassandra, elasticsearch, couchdb, influxdb, neo4j, memcached
+  milvus, qdrant, weaviate, chromadb, pgvector (vector databases)
 
 Examples:
   python3 auger.py --host 10.0.0.1 --db-type mysql --username root --password secret
@@ -5688,6 +6218,8 @@ Examples:
   python3 auger.py --db-file /path/to/database.sqlite3
   python3 auger.py --db-file /path/to/backup.sql --db-type sqldump
   python3 auger.py --db-file /path/to/dump.rdb
+  python3 auger.py --host 10.0.0.1 --db-type milvus
+  python3 auger.py --host 10.0.0.1 --db-type qdrant --password my-api-key
 """
     )
     p.add_argument("--settings",    metavar="FILE",   help="JSON settings file (Crucible mode)")
@@ -5700,6 +6232,7 @@ Examples:
                             "mongodb","redis","cassandra","elasticsearch","elastic","es",
                             "couchdb","influxdb","neo4j","memcached","redshift","dynamodb",
                             "rds",
+                            "milvus","qdrant","weaviate","chromadb","chroma","pgvector",
                             "sqlite","sqldump","redis_rdb","h2"])
     p.add_argument("-U", "--username", metavar="USER", default="")
     p.add_argument("-P", "--password", metavar="PASS", default="")

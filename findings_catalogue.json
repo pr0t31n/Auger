@@ -2,7 +2,7 @@
       "version": "1.6.0",
       "tool": "auger",
       "generated": "(complete: upgraded existing + scaffolded missing)",
-      "total": 85,
+      "total": 95,
       "from_existing": 0,
       "newly_scaffolded": 85,
       "findings": [
@@ -710,7 +710,7 @@
             },
             {
                   "id": "AU-019",
-                  "title": "Database: CouchDB Admin Party Mode \u2014 No Admin Accounts Configured",
+                  "title": "Database: CouchDB Admin Party Mode — No Admin Accounts Configured",
                   "aliases": [],
                   "source_tools": [
                         "auger"
@@ -2465,7 +2465,7 @@
             },
             {
                   "id": "AU-064",
-                  "title": "Discovery: Neo4j Cluster Mode Detected \u2014 Verify Firewall Isolation",
+                  "title": "Discovery: Neo4j Cluster Mode Detected — Verify Firewall Isolation",
                   "aliases": [],
                   "source_tools": [
                         "auger"
@@ -2699,7 +2699,7 @@
             },
             {
                   "id": "AU-070",
-                  "title": "Database: Oracle UTL_FILE_DIR Wildcard \u2014 Arbitrary File Read/Write",
+                  "title": "Database: Oracle UTL_FILE_DIR Wildcard — Arbitrary File Read/Write",
                   "aliases": [],
                   "source_tools": [
                         "auger"
@@ -3320,6 +3320,622 @@
                   "impact": "",
                   "_scaffold_from": "auger.py:3038",
                   "_template": false
+            },
+            {
+                  "id": "AU-VDB-001",
+                  "title": "Milvus Unauthenticated Access",
+                  "aliases": [
+                        "Milvus No Auth",
+                        "Milvus Open Access"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "HIGH",
+                  "description": "The Milvus vector database instance is accessible without any authentication credentials. Milvus stores high-dimensional vector embeddings used in RAG (Retrieval-Augmented Generation) systems, similarity search, and AI/ML pipelines. Without authentication, any network-reachable client can list, query, insert, update, or delete collections and their vector data.",
+                  "impact": "An attacker can exfiltrate all stored vector embeddings, which may encode sensitive document content, user queries, or proprietary model outputs. They can also poison the vector store by inserting malicious embeddings, causing RAG systems to return manipulated or harmful results. Full collection deletion is also possible, disrupting AI-dependent services.",
+                  "cwe": [
+                        "CWE-306"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 7.5,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.AA-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3",
+                        "AC-17"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1190",
+                              "tactic": "Initial Access",
+                              "name": "Exploit Public-Facing Application"
+                        }
+                  ],
+                  "searchsploit_terms": [
+                        "milvus"
+                  ],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Enable Milvus authentication by setting common.security.authorizationEnabled=true in milvus.yaml. Create named users with strong passwords and assign least-privilege roles. Restrict network access to Milvus ports (19530/19121) using firewall rules.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl",
+                        "pymilvus"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-002",
+                  "title": "Milvus Default/Weak Root Password",
+                  "aliases": [
+                        "Milvus Default Password",
+                        "Milvus Root Milvus Password"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "CRITICAL",
+                  "description": "The Milvus vector database accepts the factory-default root password ('Milvus'). Every Milvus installation ships with this credential, and it is widely documented. When authentication is enabled but the root password is not changed, the instance is effectively unprotected.",
+                  "impact": "An attacker with the default root credential has full administrative access: they can create/drop collections, read/write all vector data, manage users, and reconfigure the cluster. This grants complete control over the AI/ML data pipeline that depends on Milvus, enabling data exfiltration, embedding poisoning, and denial of service.",
+                  "cwe": [
+                        "CWE-1393",
+                        "CWE-798"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 9.8,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A07:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.AA-01"
+                  ],
+                  "nist_800_53": [
+                        "IA-5"
+                  ],
+                  "nist_800_171": [
+                        "3.5.7"
+                  ],
+                  "pci_dss_4": [
+                        "2.2.2"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.3"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1078.001",
+                              "tactic": "Initial Access",
+                              "name": "Valid Accounts: Default Accounts"
+                        }
+                  ],
+                  "searchsploit_terms": [
+                        "milvus"
+                  ],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Change the root password immediately using the Milvus SDK or CLI: from pymilvus import utility; utility.reset_password('root', 'Milvus', '<new_strong_password>'). Enforce password complexity policies and rotate credentials on a regular schedule.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Easy",
+                  "validation_tools": [
+                        "curl",
+                        "pymilvus"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-003",
+                  "title": "Qdrant API Unauthenticated Access",
+                  "aliases": [
+                        "Qdrant No API Key",
+                        "Qdrant Open REST API"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "HIGH",
+                  "description": "The Qdrant vector database REST API is accessible without an API key. Qdrant exposes HTTP (port 6333) and gRPC (port 6334) endpoints for managing collections, points (vectors + payloads), and snapshots. Without an API key, any client with network access has full read/write control.",
+                  "impact": "An attacker can query all stored vector embeddings and their associated payloads (which often contain source text, metadata, or user data from RAG pipelines). They can modify or delete collections to disrupt AI services, or insert poisoned embeddings to manipulate search results and LLM responses.",
+                  "cwe": [
+                        "CWE-306"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 7.5,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.AA-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1190",
+                              "tactic": "Initial Access",
+                              "name": "Exploit Public-Facing Application"
+                        }
+                  ],
+                  "searchsploit_terms": [
+                        "qdrant"
+                  ],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Enable API key authentication by setting QDRANT__SERVICE__API_KEY in the Qdrant configuration or environment. Use a strong, randomly-generated key. For production, also enable TLS and restrict network access to the Qdrant ports (6333/6334) with firewall rules.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Easy",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-004",
+                  "title": "Qdrant Collection Data Exposure",
+                  "aliases": [
+                        "Qdrant Collection Listing",
+                        "Qdrant Data Readable"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "MEDIUM",
+                  "description": "All Qdrant collections are listable and their contents (vectors and payloads) are readable. Qdrant does not support per-collection access control; authentication is all-or-nothing. When accessible, every collection's stored embeddings and associated payload data are fully exposed.",
+                  "impact": "Stored vector embeddings may encode sensitive information from documents ingested into RAG systems, user search queries, or proprietary model outputs. Collection names and payload schemas also reveal the architecture and data sources of the AI system. An attacker can reconstruct approximate source content from embeddings using inversion techniques.",
+                  "cwe": [
+                        "CWE-200"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 5.3,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.DS-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [
+                        "Art. 32"
+                  ],
+                  "mitre_attack": [],
+                  "searchsploit_terms": [],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Enable API key authentication on Qdrant. Segment sensitive data into separate Qdrant instances with distinct API keys. Consider encrypting payloads at the application layer before storing them in Qdrant.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-005",
+                  "title": "Weaviate Anonymous Access Enabled",
+                  "aliases": [
+                        "Weaviate No Auth",
+                        "Weaviate Open Access"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "HIGH",
+                  "description": "The Weaviate vector database allows anonymous read/write access. The schema endpoint is accessible without authentication, enabling full enumeration of classes (object types), properties, and stored data. Weaviate supports OIDC and API key auth, but ships with anonymous access enabled by default.",
+                  "impact": "An attacker can read all stored objects and their vector representations, modify the schema, create or delete classes, and manipulate stored data. In a RAG context, this allows exfiltration of ingested documents, poisoning of the knowledge base, and disruption of AI-powered search and retrieval.",
+                  "cwe": [
+                        "CWE-306"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 7.5,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.AA-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1190",
+                              "tactic": "Initial Access",
+                              "name": "Exploit Public-Facing Application"
+                        }
+                  ],
+                  "searchsploit_terms": [
+                        "weaviate"
+                  ],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Disable anonymous access in the Weaviate configuration by setting AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=false. Configure OIDC or API key authentication. Restrict network access to port 8080 using firewall rules.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-006",
+                  "title": "Weaviate Backup API Exposed",
+                  "aliases": [
+                        "Weaviate Backup Endpoint",
+                        "Weaviate Backup Without Auth"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "MEDIUM",
+                  "description": "The Weaviate backup API endpoint (/v1/backups) is accessible without authentication. This endpoint allows creating full database backups to configured storage backends (S3, GCS, filesystem) and restoring from existing backups.",
+                  "impact": "An attacker can trigger a full backup of the Weaviate database to exfiltrate all stored objects, vectors, and schema definitions. They can also restore from a manipulated backup to overwrite the entire database with attacker-controlled content, effectively hijacking the knowledge base that downstream AI systems depend on.",
+                  "cwe": [
+                        "CWE-306"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 5.3,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A05:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.DS-01"
+                  ],
+                  "nist_800_53": [
+                        "CP-9"
+                  ],
+                  "nist_800_171": [
+                        "3.8.9"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.12.3.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1530",
+                              "tactic": "Collection",
+                              "name": "Data from Cloud Storage"
+                        }
+                  ],
+                  "searchsploit_terms": [],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Disable anonymous access and require authentication for all Weaviate API endpoints including /v1/backups. Restrict backup storage backend permissions so that only authorized service accounts can write to or read from the backup destination.",
+                  "remediation_component": "Configuration",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-007",
+                  "title": "ChromaDB Unauthenticated Access",
+                  "aliases": [
+                        "ChromaDB No Auth",
+                        "ChromaDB Open API"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "HIGH",
+                  "description": "The ChromaDB REST API is accessible without authentication. ChromaDB is a popular open-source embedding database used in RAG pipelines and LLM applications. By default, ChromaDB ships with no authentication mechanism, making all collections and their embeddings accessible to any client that can reach the API port.",
+                  "impact": "An attacker can enumerate all collections, read stored embeddings and their associated metadata/documents, create or delete collections, and insert poisoned embeddings. In RAG pipelines, this allows exfiltration of the knowledge base and manipulation of LLM responses through embedding poisoning.",
+                  "cwe": [
+                        "CWE-306"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 7.5,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.AA-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [
+                        {
+                              "technique": "T1190",
+                              "tactic": "Initial Access",
+                              "name": "Exploit Public-Facing Application"
+                        }
+                  ],
+                  "searchsploit_terms": [
+                        "chromadb"
+                  ],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Enable ChromaDB server authentication by configuring CHROMA_SERVER_AUTHN_PROVIDER (e.g., chromadb.auth.token_authn.TokenAuthenticationServerProvider) and setting CHROMA_SERVER_AUTHN_CREDENTIALS. Restrict network access to port 8000. Consider deploying ChromaDB behind an authenticating reverse proxy.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-008",
+                  "title": "ChromaDB Collection Enumeration",
+                  "aliases": [
+                        "ChromaDB Collection Listing",
+                        "ChromaDB Data Exposure"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "MEDIUM",
+                  "description": "All ChromaDB collections are enumerable via the REST API. Collection names, metadata, and embedding counts are exposed. ChromaDB does not support per-collection access control; any authenticated (or unauthenticated, if auth is disabled) client can list and access all collections.",
+                  "impact": "Collection names and counts reveal the structure and scale of the AI/ML data pipeline. Stored embeddings encode information from source documents, and approximate inversion can recover sensitive content. An attacker gains a map of the entire RAG knowledge base and can target specific collections for data exfiltration.",
+                  "cwe": [
+                        "CWE-200"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 5.3,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.DS-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [
+                        "Art. 32"
+                  ],
+                  "mitre_attack": [],
+                  "searchsploit_terms": [],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Enable authentication on ChromaDB. Implement application-layer access control that restricts which clients can access which collections. Segment sensitive data into separate ChromaDB instances with distinct credentials.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "curl"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-009",
+                  "title": "pgvector Extension Publicly Accessible",
+                  "aliases": [
+                        "pgvector Public",
+                        "PostgreSQL Vector Extension Exposed"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "MEDIUM",
+                  "description": "The pgvector extension is installed on a network-accessible PostgreSQL instance. pgvector adds vector similarity search capabilities (cosine distance, L2 distance, inner product) to PostgreSQL, commonly used to store and query embeddings for RAG and AI applications. When the PostgreSQL instance is reachable from untrusted networks, the vector data stored via pgvector is exposed to the same access controls as regular PostgreSQL tables.",
+                  "impact": "An attacker with database access (even read-only) can query vector columns to extract stored embeddings. These embeddings encode information from source documents, and approximate inversion or nearest-neighbor attacks can reveal sensitive content. The presence of pgvector also reveals that the database serves AI/ML workloads, helping an attacker target the most valuable data.",
+                  "cwe": [
+                        "CWE-200"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 4.3,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A05:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.DS-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [],
+                  "mitre_attack": [],
+                  "searchsploit_terms": [],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Restrict network access to the PostgreSQL instance using pg_hba.conf and firewall rules. Ensure only trusted application servers can connect. Consider using separate PostgreSQL roles with minimal privileges for vector data access. Encrypt connections with SSL.",
+                  "remediation_component": "Network",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Easy",
+                  "validation_tools": [
+                        "psql"
+                  ]
+            },
+            {
+                  "id": "AU-VDB-010",
+                  "title": "pgvector Embedding Data Exposure",
+                  "aliases": [
+                        "pgvector Column Exposure",
+                        "Vector Column Without ACL"
+                  ],
+                  "source_tools": [
+                        "auger"
+                  ],
+                  "risk": "MEDIUM",
+                  "description": "PostgreSQL tables containing pgvector vector columns are accessible without column-level access restrictions. Vector columns store embedding data that encodes information from source documents, user inputs, or proprietary models. Standard PostgreSQL GRANT/REVOKE applies at table or column level, but no column-level restrictions were found on the vector columns.",
+                  "impact": "Any database user with SELECT privileges on the affected tables can read the embedding vectors. These vectors can be used for nearest-neighbor attacks to identify similar documents, or subjected to embedding inversion techniques to approximate the original source content. In multi-tenant systems, this may expose one tenant's data to another.",
+                  "cwe": [
+                        "CWE-200"
+                  ],
+                  "cve_examples": [],
+                  "cvss_v3_base": 4.3,
+                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+                  "nessus_plugin_ids": [],
+                  "qualys_qids": [],
+                  "owasp_web": "A01:2021",
+                  "owasp_api": "",
+                  "nist_csf2": [
+                        "PR.DS-01"
+                  ],
+                  "nist_800_53": [
+                        "AC-3"
+                  ],
+                  "nist_800_171": [
+                        "3.1.1"
+                  ],
+                  "pci_dss_4": [
+                        "7.2.1"
+                  ],
+                  "iso_27001": [
+                        "A.9.4.1"
+                  ],
+                  "iso_27002": [],
+                  "soc2": [
+                        "CC6.1"
+                  ],
+                  "hitrust": [],
+                  "gdpr": [
+                        "Art. 32"
+                  ],
+                  "mitre_attack": [],
+                  "searchsploit_terms": [],
+                  "metasploit_modules": [],
+                  "kev": false,
+                  "remediation_brief": "Apply column-level REVOKE on vector columns for all non-application roles: REVOKE SELECT (embedding_col) ON table FROM public. Create dedicated roles for vector query access with least-privilege grants. Consider using PostgreSQL Row Level Security (RLS) for multi-tenant isolation.",
+                  "remediation_component": "Authentication",
+                  "remediation_category": "Access Control",
+                  "remediation_effort": "Moderate",
+                  "validation_tools": [
+                        "psql"
+                  ]
             }
       ]
 }
