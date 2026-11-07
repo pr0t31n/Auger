@@ -64,7 +64,7 @@ Auger is a read-only, authenticated database security auditor for the pr0t31n to
 - **Default credentials check**: probes known default username/password pairs per engine
 - **Sensitive column detection**: scans `information_schema` for PII/PHI/PCI column names
 - **TLS/SSL inspection**: version, cipher suite, certificate expiry, self-signed detection
-- **Findings catalogue**: 44-entry JSON catalogue (`catalogue/auger_catalogue.json`) with full compliance metadata
+- **Findings catalogue**: 95-entry JSON catalogue (`findings_catalogue.json`) with full compliance metadata
 - **Fracture-compatible output**: `findings.json`, `findings.csv`, `summary.json`, `scan.log`, `errors.log`
 - **Crucible integration**: runs as a managed subprocess under Crucible's console tab (tool key `db`)
 
