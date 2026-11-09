@@ -152,11 +152,30 @@ def ensure_opt_dir():
 
 # ─── main ────────────────────────────────────────────────────────────────────
 
+def _check_prereqs():
+    """Verify required system tools are present before attempting install."""
+    REQUIRED = [
+        ("pip3", "pip3 — required for Python packages (apt: python3-pip)"),
+    ]
+    missing = []
+    for binary, desc in REQUIRED:
+        if not shutil.which(binary):
+            missing.append(f"  ✗ {binary}  ({desc})")
+    if missing:
+        print(f"\nERROR: Missing required prerequisites:\n")
+        for m in missing:
+            print(m)
+        print(f"\nInstall them first, then re-run install.py.\n")
+        sys.exit(1)
+
+
 def main():
     if sys.version_info < MIN_PYTHON:
         v = ".".join(map(str, MIN_PYTHON))
         print(f"ERROR: Python {v}+ required (got {sys.version_info.major}.{sys.version_info.minor})")
         sys.exit(1)
+
+    _check_prereqs()
 
     print(f"\n{'='*60}")
     print(f"  {TOOL_NAME} — Database Security Auditor — Installation")
