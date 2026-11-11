@@ -37,6 +37,14 @@ VERSION = Path(__file__).resolve().parent.joinpath("VERSION").read_text().strip(
 # Crucible protocol tokens (same as Fracture/Siphon)
 # ---------------------------------------------------------------------------
 _CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+
+try:
+    import sys as _sys_ie
+    if "/opt/pr0t31n/shared" not in _sys_ie.path:
+        _sys_ie.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_intel_emitter as _ie
+except ImportError:
+    _ie = None
 _CP_LOG    = "__CRUCIBLE_LOG__:"
 _CP_ERR    = "__CRUCIBLE_ERR__:"
 _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
@@ -635,6 +643,72 @@ class AugerOutput:
     def write_schema(self, schema: dict) -> None:
         self.schema_json.write_text(json.dumps(schema, indent=2, ensure_ascii=False),
                                     encoding="utf-8")
+        if _ie and _CRUCIBLE_MANAGED and schema:
+            try:
+                _db_type = schema.get("db_type", "")
+                _host = self.host
+                _port = self.port
+                for _sname, _sdata in schema.get("schemas", schema.get("databases", {})).items():
+                    _tables = _sdata if isinstance(_sdata, dict) else {}
+                    _ie.emit_intel("db_schema", {
+                        "db_type":     _db_type,
+                        "schema_name": _sname,
+                        "host":        _host,
+                        "port":        _port,
+                        "table_count": len(_tables),
+                    })
+                    _tbl_rows = []
+                    _col_rows = []
+                    for _tname, _tdata in _tables.items():
+                        if not isinstance(_tdata, dict):
+                            continue
+                        _cols = _tdata.get("columns", [])
+                        _tbl_rows.append({
+                            "schema_name": _sname,
+                            "table_name":  _tname,
+                            "row_count":   _tdata.get("row_count"),
+                            "column_count": len(_cols) if isinstance(_cols, list) else 0,
+                            "has_pii":     int(any(
+                                c.get("pii_type") for c in _cols
+                                if isinstance(c, dict)
+                            )) if isinstance(_cols, list) else 0,
+                            "engine":      _tdata.get("engine"),
+                        })
+                        for _c in (_cols if isinstance(_cols, list) else []):
+                            if not isinstance(_c, dict):
+                                continue
+                            _col_rows.append({
+                                "schema_name":  _sname,
+                                "table_name":   _tname,
+                                "column_name":  _c.get("name", _c.get("column_name", "")),
+                                "data_type":    _c.get("type", _c.get("data_type", "")),
+                                "is_nullable":  int(_c.get("nullable", True)),
+                                "is_primary":   int(_c.get("primary_key", False)),
+                                "pii_type":     _c.get("pii_type"),
+                            })
+                    if _tbl_rows:
+                        _ie.emit_intel("db_table", _tbl_rows, bulk=True)
+                    if _col_rows:
+                        _ie.emit_intel("db_column", _col_rows, bulk=True)
+                _privs = schema.get("privileges", [])
+                if isinstance(_privs, list) and _privs:
+                    _priv_rows = []
+                    for _p in _privs:
+                        if not isinstance(_p, dict):
+                            continue
+                        _priv_rows.append({
+                            "grantee":       _p.get("grantee", _p.get("user", "")),
+                            "privilege":     _p.get("privilege", _p.get("priv_type", "")),
+                            "host":          _host,
+                            "port":          _port,
+                            "target_schema": _p.get("schema", _p.get("target_schema")),
+                            "target_table":  _p.get("table", _p.get("target_table")),
+                            "is_grantable":  int(_p.get("grantable", False)),
+                        })
+                    if _priv_rows:
+                        _ie.emit_intel("db_privilege", _priv_rows, bulk=True)
+            except Exception:
+                pass
 
     def write_checkpoint(self, db_version: str, db_type: str,
                          completed_phases: list, auth_success: bool) -> None:
