@@ -382,16 +382,17 @@ class AugerOutput:
         self._action_items: list = []
         self._ai_seen: set = set()
         self._fdb = None
-        _db_path = os.environ.get("PR0T31N_FINDINGS_DB")
-        if _db_path:
-            try:
-                import sys as _s
-                if "/opt/pr0t31n/shared" not in _s.path:
-                    _s.path.insert(0, "/opt/pr0t31n/shared")
-                import pr0t31n_findings_db
-                self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
-            except Exception:
-                self._fdb = None
+        _db_path = os.environ.get("PR0T31N_FINDINGS_DB") or str(self.root / "findings.db")
+        try:
+            import sys as _s
+            if "/opt/pr0t31n/shared" not in _s.path:
+                _s.path.insert(0, "/opt/pr0t31n/shared")
+            import pr0t31n_findings_db
+            self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
+        except Exception:
+            self._fdb = None
+        if self._fdb and _ie:
+            _ie.init_db(self._fdb)
         self._setup()
 
     def _setup(self) -> None:
@@ -547,13 +548,13 @@ class AugerOutput:
             except Exception:
                 existing = []
             existing.append(entry)
-            self.findings_json.write_text(json.dumps(existing, indent=2, ensure_ascii=False),
-                                           encoding="utf-8")
             if self._fdb:
                 try:
                     self._fdb.insert_finding(entry)
                 except Exception:
                     pass
+            self.findings_json.write_text(json.dumps(existing, indent=2, ensure_ascii=False),
+                                           encoding="utf-8")
             try:
                 with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                     w = csv.DictWriter(f, fieldnames=FINDINGS_CSV_FIELDS, extrasaction="ignore")
@@ -641,9 +642,7 @@ class AugerOutput:
         self.summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     def write_schema(self, schema: dict) -> None:
-        self.schema_json.write_text(json.dumps(schema, indent=2, ensure_ascii=False),
-                                    encoding="utf-8")
-        if _ie and _CRUCIBLE_MANAGED and schema:
+        if _ie and schema:
             try:
                 _db_type = schema.get("db_type", "")
                 _host = self.host
@@ -709,6 +708,8 @@ class AugerOutput:
                         _ie.emit_intel("db_privilege", _priv_rows, bulk=True)
             except Exception:
                 pass
+        self.schema_json.write_text(json.dumps(schema, indent=2, ensure_ascii=False),
+                                    encoding="utf-8")
 
     def write_checkpoint(self, db_version: str, db_type: str,
                          completed_phases: list, auth_success: bool) -> None:
