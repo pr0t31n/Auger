@@ -19,6 +19,7 @@ import re
 import socket
 import ssl
 import argparse
+import tempfile
 import threading
 import time
 import csv
@@ -59,6 +60,81 @@ try:
 except ImportError:
     _pp = None
 _PAUSE = None
+_pm = None
+
+
+class _ProgressManager:
+    """Per-check checkpoint persistence for resume support."""
+    def __init__(self, path):
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._state = {"completed_phases": [], "phase_status": {}, "scan_state": {}}
+        if self._path.exists():
+            try:
+                self._state = json.loads(self._path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+            if "completed_phases" not in self._state:
+                self._state["completed_phases"] = []
+            if "phase_status" not in self._state:
+                self._state["phase_status"] = {}
+            if "scan_state" not in self._state:
+                self._state["scan_state"] = {}
+
+    def _save(self):
+        try:
+            d = self._path.parent
+            d.mkdir(parents=True, exist_ok=True)
+            import tempfile as _tf
+            fd, tmp = _tf.mkstemp(dir=str(d), suffix=".tmp")
+            try:
+                import os as _os2
+                with _os2.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self._state, f, indent=2, default=str)
+                _os2.replace(tmp, str(self._path))
+            except BaseException:
+                try:
+                    import os as _os3
+                    _os3.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            pass
+
+    def is_phase_complete(self, key):
+        with self._lock:
+            return key in self._state["completed_phases"]
+
+    def set_phase_status(self, key, status):
+        with self._lock:
+            self._state["phase_status"][key] = status
+            if status == "complete" and key not in self._state["completed_phases"]:
+                self._state["completed_phases"].append(key)
+            self._save()
+
+    def save_scan_state(self, state_dict):
+        with self._lock:
+            self._state["scan_state"].update(state_dict)
+            self._save()
+
+    def load_scan_state(self):
+        with self._lock:
+            return dict(self._state.get("scan_state", {}))
+
+    def has_resumable_state(self):
+        with self._lock:
+            return bool(self._state.get("completed_phases"))
+
+    def prepare_resume(self):
+        with self._lock:
+            ps = self._state.get("phase_status", {})
+            for k, v in list(ps.items()):
+                if v in ("running", "error"):
+                    ps[k] = "pending"
+            self._state.get("scan_state", {}).pop("paused", None)
+            self._save()
+
 
 # ---------------------------------------------------------------------------
 # ANSI colours (disabled under Crucible)
@@ -326,30 +402,38 @@ def _run_checks(db_label: str, host: str, port: int, checks: list,
     phases: list = []
     total = len(checks)
     for idx, (method, phase) in enumerate(checks, 1):
+        ck = f"check#{db_label}#{method.__name__}"
+        if _pm and _pm.is_phase_complete(ck):
+            _console.log(f"[{phase}] Resuming — skipping completed: {_check_label(method.__name__)}", "INFO")
+            if phase not in phases:
+                phases.append(phase)
+            continue
         label = _check_label(method.__name__)
         _console.status(db_label.lower(), label=f"{db_label} {phase}",
                         step=method.__name__, status="running",
                         progress=idx, total=total)
         _console.log(f"[{phase}] Checking {label} on {host}:{port}...", "INFO")
         out.log_step(f"START {db_label} {method.__name__} ({phase})")
+        if _pm:
+            _pm.set_phase_status(ck, "running")
         try:
             result = method()
             if result is not None and isinstance(result, str) and result:
                 _console.log(f"[{phase}] {label} — {result}", "SUCCESS")
             else:
                 _console.log(f"[{phase}] {label} — done", "INFO")
+            if _pm:
+                _pm.set_phase_status(ck, "complete")
         except Exception as e:
             _console.log(f"[{phase}] {label} — error: {e}", "ERROR")
             out.log_error(method.__name__, str(e))
+            if _pm:
+                _pm.set_phase_status(ck, "error")
         out.log_step(f"END   {db_label} {method.__name__}")
         if phase not in phases:
             phases.append(phase)
     return phases
 
-
-# ---------------------------------------------------------------------------
-# Output / finding manager  (Fracture-compatible schema)
-# ---------------------------------------------------------------------------
 _RE_UNSAFE = re.compile(r'[^\w\-]')
 
 FINDINGS_CSV_FIELDS = [
@@ -4902,6 +4986,16 @@ def run_audit(cfg: dict) -> int:
         if _resumed:
             _PAUSE.cleanup_incomplete()
 
+    global _pm
+    _pm = _ProgressManager(out.root / "progress_checkpoint.json")
+    if _pm.has_resumable_state():
+        _pm.prepare_resume()
+        _cc = len(_pm._state.get("completed_phases", []))
+        _console.log(f"Resuming from progress checkpoint: {_cc} checks already complete", "INFO")
+
+    if _PAUSE is not None:
+        _PAUSE.on_checkpoint = lambda: _pm.save_scan_state({"paused": True})
+
     # Optional: update CVEs from NVD before audit
     if update_cves:
         catalogue_dir = Path(__file__).parent / "catalogue"
@@ -4925,7 +5019,12 @@ def run_audit(cfg: dict) -> int:
     out.log_step(f"TCP {host}:{port} open")
 
     # Network / TLS checks
-    run_network_phase(host, port, out)
+    if _pm and _pm.is_phase_complete("phase#network"):
+        _console.log("Resuming — skipping completed network/TLS phase", "INFO")
+    else:
+        run_network_phase(host, port, out)
+        if _pm:
+            _pm.set_phase_status("phase#network", "complete")
 
     if _PAUSE and _PAUSE.check_and_pause(): sys.exit(_pp.EXIT_PAUSED)
 
